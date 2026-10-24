@@ -56,6 +56,17 @@ LONG_TEX_CHARS = 150
 # 只由标点组成的残片，应粘回前一个块
 PUNCT_ONLY = re.compile(r"^[\s，。；：、,.;:）)】\]】\"'～~—\-]+$")
 
+# CJK 字符与全角标点。行内公式与它们相邻时，不少渲染器不认定界符。
+CJK = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
+
+
+def _boundary_after_formula(text):
+    """把「$公式$紧跟中文」改成「$公式$ 紧跟中文」。
+
+    只在闭合 $ 后紧贴 CJK 时插入一个空格，其余情况原样返回。
+    """
+    return re.sub(r"(?<=\$)(?=" + CJK.pattern + r")", " ", text)
+
 BLOCK_ENV = re.compile(
     r"\\begin\{(aligned|array|matrix|pmatrix|bmatrix|vmatrix|cases|split|"
     r"gather|align|eqnarray|equation)\}")
@@ -308,12 +319,24 @@ def main():
                     # 一个 $$ 定界符，导致其后整篇错位。补一个空格隔开。
                     if line and line[-1].endswith("$"):
                         line.append(" ")
+                    # 行内公式与中文之间必须留出边界。
+                    # 不少渲染器（Pandoc 的 tex_math_dollars、部分 KaTeX 集成）
+                    # 只在 $ 与前后字符有明确边界时才识别为公式；紧贴中文时
+                    # 会被当成普通文本，用户看到的就是「LaTeX 源码原样出现」。
+                    # 只在紧贴 CJK 时补空格，纯 ASCII 上下文不动，避免把
+                    # $a$b 这类正常写法也无谓地撑开。
+                    # 注意要看「已攒文本的整体末尾」，不能只看 line[-1]，
+                    # 因为最后一个元素可能是一整段文字而非单个字符。
+                    if line and CJK.match("".join(line)[-1:] or ""):
+                        line.append(" ")
                     line.append("$%s$" % tex)
                     stats["formulas_inline"] += 1
 
         rest = "".join(line).strip()
         if pending:
             rest = rest + "".join(pending)
+        # 公式后紧跟中文时同样要补边界，否则渲染器不认定界结束。
+        rest = _boundary_after_formula(rest)
         if rest:
             out.append(rest)
             out.append("")

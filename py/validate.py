@@ -42,6 +42,9 @@ T5_MAX_CELL_FORMULA = 60
 INLINE_BAD_LINEBREAK = re.compile(r"(?<!\\)\\\\")      # 未被转义的 \\
 INLINE_BAD_ALIGN = re.compile(r"(?<!\\)&")              # 未被转义的 &
 
+# CJK 字符与全角标点：公式与它们相邻时缺边界，部分渲染器就不认定界符。
+CJK_CHAR = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
+
 
 def _inline_bodies(line):
     """找出这一行里所有行内公式（$...$）的内容。"""
@@ -84,6 +87,23 @@ def check(md_lines):
                 errors.append(
                     "T2: 第 %d 行行内公式含未转义的 &（对齐符），应改用 $$ 块: %s"
                     % (i, body[:80]))
+
+        # T10: 行内公式与中文之间必须有边界。
+        # 不少渲染器（Pandoc 的 tex_math_dollars、部分 KaTeX 集成）只在 $ 与
+        # 前后字符有明确边界时才识别为公式；紧贴中文时按普通文本处理，用户
+        # 看到的就是「LaTeX 源码原样出现」或公式整段不显示。实测一份真实文档
+        # 里有 21 处属于这种情况。
+        for m in re.finditer(r"(?<!\$)\$([^$\n]+?)\$(?!\$)", ln):
+            before = ln[m.start() - 1] if m.start() > 0 else ""
+            after = ln[m.end()] if m.end() < len(ln) else ""
+            if before and CJK_CHAR.match(before):
+                warns.append(
+                    "T10: 第 %d 行公式紧贴前面的中文（应为「中文 $公式$」）: %s"
+                    % (i, ln[max(0, m.start() - 20):m.end() + 20]))
+            if after and CJK_CHAR.match(after):
+                warns.append(
+                    "T10: 第 %d 行公式紧贴后面的中文（应为「$公式$ 中文」）: %s"
+                    % (i, ln[max(0, m.start() - 20):m.end() + 20]))
 
         # T5: 表格行里的超长公式
         if s.startswith("|") and s.count("|") >= 2:

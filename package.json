@@ -2,7 +2,7 @@
   "name": "dsh-docx2md",
   "displayName": "DSH DOCX → Markdown",
   "description": "把含 OLE 公式的 Word 文档转成带 LaTeX 的 Markdown —— 跨平台，保留公式编号与结构。",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "sidady",
   "keywords": [
     "dsh-plugin",

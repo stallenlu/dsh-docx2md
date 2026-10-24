@@ -184,6 +184,35 @@ rec('Config resolve 是同步的（cordis 不支持 async）', () => {
   if (r && typeof r.then === 'function') throw new Error('validate 返回了 Promise')
 })
 
+// 排版阈值是用户可配的。这两个参数一旦从 parameters 里消失，用户就没法
+// 在不改全局配置的情况下针对单篇文档调排版——要钉住。
+rec('docx2md_build 暴露了 longTexChars / t5MaxCellFormula', () => {
+  const b = registered.find((t) => t.name === 'docx2md_build')
+  if (!b) throw new Error('找不到 docx2md_build')
+  for (const k of ['longTexChars', 't5MaxCellFormula']) {
+    const node = b.parameters.properties?.[k]
+    if (!node) throw new Error(`parameters 里缺 ${k}`)
+    if (node.type !== 'integer') throw new Error(`${k} 应为 integer，实际 ${node.type}`)
+  }
+})
+rec('Config 填充排版阈值默认值', () => {
+  const v = cordisResolveConfig(mod, {})
+  if (v.longTexChars !== 80) throw new Error(`longTexChars 默认应为 80，实际 ${v.longTexChars}`)
+  if (v.t5MaxCellFormula !== 60) throw new Error(`t5MaxCellFormula 默认应为 60，实际 ${v.t5MaxCellFormula}`)
+})
+rec('Config 拒绝非法阈值（0 / 小数 / 负值）', () => {
+  for (const bad of [{ longTexChars: 0 }, { longTexChars: 1.5 }, { t5MaxCellFormula: 0 }]) {
+    let threw = false
+    try { cordisResolveConfig(mod, bad) } catch { threw = true }
+    if (!threw) throw new Error(`${JSON.stringify(bad)} 未被拦截`)
+  }
+})
+rec('Config 接受合法阈值覆盖', () => {
+  const v = cordisResolveConfig(mod, { longTexChars: 150, t5MaxCellFormula: 200 })
+  if (v.longTexChars !== 150) throw new Error('longTexChars 未生效')
+  if (v.t5MaxCellFormula !== 200) throw new Error('t5MaxCellFormula 未生效')
+})
+
 console.log('== tool 契约测试 ==')
 let fail = 0
 for (const [name, ok, msg] of checks) {

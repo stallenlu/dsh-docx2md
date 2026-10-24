@@ -33,10 +33,12 @@ INLINE = re.compile(r"(?<!\$)\$([^$\n]+?)\$(?!\$)")
 BLOCK_ENV = re.compile(r"\\begin\{(aligned|array|matrix|pmatrix|bmatrix|cases|split|gather|align)")
 
 
-def run_build(workdir, latex_path, out_path):
-    r = subprocess.run([sys.executable, "build.py", workdir, "--latex", latex_path,
-                        "--out", out_path, "--use-suggested"],
-                       cwd=PY_DIR, capture_output=True, text=True)
+def run_build(workdir, latex_path, out_path, long_tex_chars=None):
+    cmd = [sys.executable, "build.py", workdir, "--latex", latex_path,
+           "--out", out_path, "--use-suggested"]
+    if long_tex_chars is not None:
+        cmd += ["--long-tex-chars", str(long_tex_chars)]
+    r = subprocess.run(cmd, cwd=PY_DIR, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError("build 失败: %s" % r.stderr.strip()[:400])
     return json.loads(r.stdout)
@@ -140,10 +142,14 @@ def main():
     work = os.path.join(os.environ.get("TMPDIR", "/tmp"), "d2m-display-syn")
     latex_path = make_synthetic(work)
     reported = run_build(work, latex_path, os.path.join(work, "out.md"))
-    problems, stats = analyse(os.path.join(work, "out.md"), 80)
+    # 阈值现在是用户可配的（插件配置 longTexChars 或单次调用参数）。
+    # 必须用 build 回报的实际阈值，不能在这里写死：写死会让用户一改配置、
+    # 这个测试就误报 D3——那是测试的错，不是产物的错。
+    limit = reported.get("long_tex_chars", 80)
+    problems, stats = analyse(os.path.join(work, "out.md"), limit)
     problems += build_stats_ok(work, reported)
-    print("  行内 %d / display %d / 最长行内 %d 字符"
-          % (stats["inline"], stats["display"], stats["max_inline_len"]))
+    print("  阈值 %d  行内 %d / display %d / 最长行内 %d 字符"
+          % (limit, stats["inline"], stats["display"], stats["max_inline_len"]))
     for p in problems:
         print("  FAIL " + p)
     if not problems:
@@ -165,10 +171,11 @@ def main():
             print("  FAIL extract 失败: %s" % r.stderr[:300])
             return 1
         reported = run_build(work, latex, os.path.join(work, "out.md"))
-        problems, stats = analyse(os.path.join(work, "out.md"), 80)
+        limit = reported.get("long_tex_chars", 80)
+        problems, stats = analyse(os.path.join(work, "out.md"), limit)
         problems += build_stats_ok(work, reported)
-        print("  行内 %d / display %d / 最长行内 %d 字符"
-              % (stats["inline"], stats["display"], stats["max_inline_len"]))
+        print("  阈值 %d  行内 %d / display %d / 最长行内 %d 字符"
+              % (limit, stats["inline"], stats["display"], stats["max_inline_len"]))
         for p in problems[:20]:
             print("  FAIL " + p)
         if not problems:

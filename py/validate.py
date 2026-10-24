@@ -60,7 +60,7 @@ def _cell_formula_lengths(line):
     return out
 
 
-def check(md_lines):
+def check(md_lines, t5_max_cell_formula=T5_MAX_CELL_FORMULA):
     errors, warns = [], []
 
     n_dollar = sum(ln.count("$$") for ln in md_lines)
@@ -108,10 +108,10 @@ def check(md_lines):
         # T5: 表格行里的超长公式
         if s.startswith("|") and s.count("|") >= 2:
             for cell, texlen in _cell_formula_lengths(s):
-                if texlen > T5_MAX_CELL_FORMULA:
+                if texlen > t5_max_cell_formula:
                     warns.append(
                         "T5: 第 %d 行表格单元格内公式 %d 字符（上限 %d），建议移出表格: %s"
-                        % (i, texlen, T5_MAX_CELL_FORMULA, cell[:60]))
+                        % (i, texlen, t5_max_cell_formula, cell[:60]))
 
         # T6: 图片占位
         if re.search(r"!\[[^\]]*\]\(\s*\)", ln):
@@ -148,13 +148,20 @@ def main():
     ap.add_argument("file")
     ap.add_argument("--expect-formulas", type=int, default=None)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--t5-max-cell-formula", type=int, default=T5_MAX_CELL_FORMULA,
+                    help="表格单元格内公式的字符上限（默认 %d）。"
+                         "超过就警告，建议把公式移出表格。" % T5_MAX_CELL_FORMULA)
     args = ap.parse_args()
+
+    if args.t5_max_cell_formula < 1:
+        sys.stderr.write("validate 输入错误: --t5-max-cell-formula 必须是正整数\n")
+        sys.exit(2)
 
     with open(args.file, "r", encoding="utf-8") as f:
         md = f.read()
     lines = md.split("\n")
 
-    errors, warns = check(lines)
+    errors, warns = check(lines, t5_max_cell_formula=args.t5_max_cell_formula)
 
     # 空文档不算通过：没有内容就没有可验证的东西，PASS 会给出错误的信心。
     if not md.strip():

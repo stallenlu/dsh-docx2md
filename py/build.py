@@ -96,10 +96,11 @@ def save_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=1)
 
 
-def classify(latex, mixed):
+def classify(latex, mixed, long_tex_chars=None):
     """判断一条公式该用 display 还是 inline。"""
+    limit = LONG_TEX_CHARS if long_tex_chars is None else long_tex_chars
     has_block = bool(BLOCK_ENV.search(latex))
-    long_tex = len(latex) > LONG_TEX_CHARS
+    long_tex = len(latex) > limit
     if mixed:
         # 与文字混排：只有超长或含块级环境才独立成块
         return has_block or long_tex
@@ -176,7 +177,15 @@ def main():
                     help="只生成 headings_suggested.json，不写 Markdown")
     ap.add_argument("--use-suggested", action="store_true",
                     help="直接用自动建议的标题（不做人工确认）")
+    ap.add_argument("--long-tex-chars", type=int, default=LONG_TEX_CHARS,
+                    help="混排段里 LaTeX 源串超过这个长度就独立成块（默认 %d）。"
+                         "调大可让更多公式留在句内、句子更连贯；调小则更多独立成块、"
+                         "长式更好读也更不容易在窄栏里溢出。" % LONG_TEX_CHARS)
     args = ap.parse_args()
+
+    if args.long_tex_chars < 1:
+        sys.stderr.write("build 输入错误: --long-tex-chars 必须是正整数\n")
+        sys.exit(3)
 
     paras_path = os.path.join(args.workdir, "paras.json")
     if not os.path.exists(paras_path):
@@ -229,7 +238,10 @@ def main():
     out = []
     stats = {"paragraphs": 0, "headings": 0, "formulas_inline": 0,
              "formulas_display": 0, "formulas_missing": len(missing),
-             "unresolved_placeholders": 0, "heading_source": heading_source}
+             "unresolved_placeholders": 0, "heading_source": heading_source,
+             # 回报实际生效的阈值：调用方据此确认参数有没有传进来，
+             # 也便于事后复现「这一版用的是哪个值」。
+             "long_tex_chars": args.long_tex_chars}
 
     prev_display = False
 
@@ -307,7 +319,7 @@ def main():
                     line.append(val)
             else:
                 tex = str(val).strip()
-                if classify(tex, mixed=True):
+                if classify(tex, mixed=True, long_tex_chars=args.long_tex_chars):
                     # 超长公式：先把已攒的文字冲出去，再独立成块
                     if pending:
                         line.append("".join(pending))

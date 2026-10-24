@@ -161,7 +161,8 @@ pnpm remove dsh-docx2md
 | 依赖 | 用途 | 必需 |
 |---|---|---|
 | Python 3.9+ | 跑 py/ 下的脚本 | ✅ |
-| `olefile`, `pypdf` | 解 OLE、抽内嵌 PDF | 自动经 uvx 安装 |
+| `olefile` | 解 OLE 容器、取 Equation Native 流 | 自动经 uvx 安装 |
+| `pypdf` | **预留，当前未使用**（见「已知限制」）| 自动经 uvx 安装 |
 | `uv`（可选） | 免手动装 Python 依赖 | 推荐 |
 
 **渲染引擎**（用于把 WMF/EMF 公式图转 PNG），按顺序自动探测：
@@ -533,6 +534,12 @@ node test/encoding.mjs 真实文档.docx    # 再验一份中文文档
 
 ## 已知限制
 
+- **EMF 内嵌 PDF 文字层未实现**。「三种手段」一节里提到这条路径（★★★★，
+  变体 B 的解法），但它在原始实验里是手工做的一步，没有固化进本插件；`pypdf`
+  目前只是预留依赖，`py/` 下零引用。因此 15/145 的变体 B 公式只能靠渲染图读，
+  读不清时 `extract` 会报出 `formulas_without_preview`，不会假装成功。
+  详见 [docs/methodology.md](docs/methodology.md) 开头的说明。
+
 - **只吃 `.docx`**。旧 `.doc` 请先用 Word / WPS 另存。非 zip、空 zip、缺
   `word/document.xml`、加密文档都会给出可读错误并以退出码 3 结束。
   **失败时不会留下空目录**：文档校验在建目录之前。
@@ -561,8 +568,12 @@ dsh-docx2md/
 │   ├── build.py       段落 + LaTeX 表 → Markdown
 │   └── validate.py    六条铁律校验
 ├── skills/docx2md/
-│   └── SKILL.md       方法论（给 Agent 读）
-└── cordis.patch.yml   插件注册
+│   └── SKILL.md       技能说明（给 Agent 读）
+├── docs/
+│   └── methodology.md 完整方法论（转换实验总结）
+├── test/              21 组测试（不进发布包）
+├── cordis.patch.yml   插件注册
+└── CHANGELOG.md
 ```
 
 `lib/` 只用 Node 内建模块。这不是洁癖——第三方插件装在 profile 的

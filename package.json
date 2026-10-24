@@ -1,0 +1,46 @@
+{
+  "name": "dsh-docx2md",
+  "displayName": "DSH DOCX → Markdown",
+  "description": "把含 OLE 公式的 Word 文档转成带 LaTeX 的 Markdown —— 跨平台，保留公式编号与结构。",
+  "version": "0.1.1",
+  "author": "sidady",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "docx",
+    "markdown",
+    "latex",
+    "ooxml",
+    "conversion"
+  ],
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js",
+    "py/*.py",
+    "skills",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  }
+}

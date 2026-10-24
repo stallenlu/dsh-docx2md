@@ -1,0 +1,7 @@
+# Register the DOCX → Markdown conversion tools and the docx2md skill.
+#
+# This plugin ships no client code: it is a pure host plugin that exposes
+# three model-facing tools plus one bundled skill.
+- insert:
+    - id: docx2md
+      name: dsh-docx2md

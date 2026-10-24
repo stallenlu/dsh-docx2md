@@ -1,0 +1,25 @@
+# Python 字节码。py/ 里的 .pyc 会随 Python 版本不同而变化，
+# 提交进仓库既无意义又会让 diff 噪音变大（本机就有 3 个版本）。
+__pycache__/
+*.py[cod]
+*.so
+
+# 打包产物
+*.tgz
+*.tar.gz
+dist/
+
+# 依赖
+node_modules/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# 测试/调试残留
+/tmp/
+*.log

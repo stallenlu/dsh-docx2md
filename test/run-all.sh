@@ -55,12 +55,20 @@ step "6. skill 契约（按 dsh-skill 真实校验复刻）"
 node test/skill-contract.mjs | tail -3
 note $?
 
-step "7. 校验器自测（T0–T9 每条规则都有反例）"
+step "7. 校验器自测（T0–T10 每条规则都有反例）"
 python3 test/validate_selftest.py | tail -3
 note $?
 
 step "7b. 公式↔预览图配对（ShapeID 优先，回退必告警）"
 python3 test/pairing_selftest.py | tail -2
+note $?
+
+step "7c. 公式可显示性（定界/边界/长度，覆盖「显示成源码」那类反馈）"
+if [ -n "$DOC" ] && [ -f "$DOC" ] && [ -f /tmp/latex_by_stream.json ]; then
+  python3 test/display_selftest.py "$DOC" /tmp/latex_by_stream.json | tail -2
+else
+  python3 test/display_selftest.py | tail -2
+fi
 note $?
 
 step "8. 边界输入"

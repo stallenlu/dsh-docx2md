@@ -350,8 +350,10 @@ await docx2md_build({
 4. `\tag` 紧跟 `\end{aligned}`
 5. 超长公式不要塞进表格单元格
 6. 图片占位用 HTML 注释 —— `![]()` 空链接会显示破图
+7. **行内公式与中文之间要有空格** —— `中文$公式$中文` 在不少渲染器里不被识别为
+   公式，用户看到的是 LaTeX 源码原样出现。`build.py` 会自动补，校验器用 **T10** 兜底。
 
-`docx2md_build` 内置 `validate.py` 会逐条检查（T1–T8）。
+`docx2md_build` 内置 `validate.py` 会逐条检查（T1–T10）。
 
 ---
 
@@ -587,12 +589,12 @@ dsh-docx2md/
 │   ├── extract.py     段落 + 公式 + 预览图
 │   ├── render.py      跨平台 WMF/EMF → PNG
 │   ├── build.py       段落 + LaTeX 表 → Markdown
-│   └── validate.py    六条铁律校验
+│   └── validate.py    六条铁律 + T9/T10 校验
 ├── skills/docx2md/
 │   └── SKILL.md       技能说明（给 Agent 读）
 ├── docs/
 │   └── methodology.md 完整方法论（转换实验总结）
-├── test/              22 组测试（不进发布包）
+├── test/              24 组测试（不进发布包）
 ├── cordis.patch.yml   插件注册
 └── CHANGELOG.md
 ```

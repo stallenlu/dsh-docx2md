@@ -326,7 +326,12 @@ def main():
                         pending = []
                     head = "".join(line).strip()
                     if head:
-                        out.append(head)
+                        # 这条 flush 路径同样要补公式边界：head 里可能已经含有
+                        # 前面若干个行内公式，而它们后面紧跟着中文。
+                        # 实测漏掉这一步时，只要段落里有个超长公式把句子劈开，
+                        # 前半段里的公式就全都变成「$公式$中文」，阈值越小
+                        # （劈开越多）越明显——阈值 40 时冒出 3 条 T10 警告。
+                        out.append(_boundary_after_formula(head))
                         out.append("")
                         line = []
                     stats["formulas_display"] += 1

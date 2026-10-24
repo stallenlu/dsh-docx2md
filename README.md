@@ -353,20 +353,40 @@ await docx2md_build({
 同一篇 145 公式文档实测：40 → 行内 28、300 → 行内 68；**公式总数始终 145**，
 改编排不会丢公式。
 
-两种传法，优先级 **单次调用 > 插件配置**：
+### 在哪改：两种传法
+
+优先级 **单次调用 > profile 配置 > 默认值**。
+
+**① 单次调用**——只对这一篇生效，最省事：
 
 ```js
-// 只对这一篇调
 await docx2md_build({ workDir: 'work/', latex: 'latex.json', out: '论文.md', longTexChars: 150 })
 ```
 
-```jsonc
-// 或改全局默认（profile 的插件配置）
-{ "dsh-docx2md": { "longTexChars": 150, "t5MaxCellFormula": 200 } }
+**② 改 profile 配置**——对所有转换生效。
+
+> ⚠️ **不在插件管理界面。** 那个页面只显示插件信息与开关，没有参数表单。
+> 参数写在 profile 的 `cordis.patch.yml` 里（`~/.dsh/profiles/desktop/cordis.patch.yml`），
+> 按插件 `id` 加一条 config 覆盖：
+
+```yaml
+# ~/.dsh/profiles/desktop/cordis.patch.yml，追加到文件末尾
+- id: docx2md
+  name: dsh-docx2md
+  config:
+    longTexChars: 150
+    t5MaxCellFormula: 200
 ```
 
-`docx2md_build` 的返回值里有 `long_tex_chars`，**用它确认参数真的生效了**——
-不要只看自己传了什么。
+`id` 必须是 `docx2md`（插件的 `cordis.patch.yml` 里声明的那一个），不是包名
+`dsh-docx2md`。
+
+profile 的 `package.json` 里若有 `"dsh": { "profile": { "patchReload": "live" } }`，
+这条配置**会热加载**，不必重启 DSH。改完直接跑一次 `docx2md_build` 看返回值里的
+`long_tex_chars` 就知道有没有生效。
+
+**验证参数真的生效**：`docx2md_build` 的返回值里有 `long_tex_chars`，那是 Python
+实际收到的值。不要只看自己传了什么——配置没写对时它不会报错，只是静默用默认值。
 
 ---
 

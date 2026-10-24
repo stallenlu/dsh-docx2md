@@ -180,13 +180,19 @@ docx2md_build(workDir="work/", latex="latex.json", out="文档.md",
 docx2md_build(workDir="work/", latex="latex.json", out="文档.md", longTexChars=150)
 ```
 
-```jsonc
-// 或在 profile 的插件配置里改全局默认
-{ "dsh-docx2md": { "longTexChars": 150, "t5MaxCellFormula": 200 } }
+改全局默认则写 profile 的 `cordis.patch.yml`（**不是**插件管理界面，那里没有
+参数表单）：
+
+```yaml
+- id: docx2md
+  name: dsh-docx2md
+  config:
+    longTexChars: 150
+    t5MaxCellFormula: 200
 ```
 
 `build` 的返回值里会回报 `long_tex_chars`，用它确认参数真的生效了——
-不要只看自己传了什么。
+不要只看自己传了什么。配置写错时不会报错，只会静默用默认值。
 
 ---
 

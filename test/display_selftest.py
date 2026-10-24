@@ -92,13 +92,19 @@ def analyse(md_path, long_tex_chars):
 
 
 def build_stats_ok(workdir, reported):
-    """D5: 公式总数与输入一致。"""
+    """D5: 公式总数与输入一致。
+
+    注意分母不是 eq_index 的条数：同一个公式可以在正文里被引用多次
+    （比如一个符号反复出现），build 会把每处引用都算一个公式。
+    所以这里数的是「paras.json 里出现了多少个占位符」，而不是有几个不同的
+    公式文件。
+    """
     problems = []
-    idx_path = os.path.join(workdir, "eq_index.json")
-    total = len(json.load(open(idx_path, encoding="utf-8")))
+    paras = json.load(open(os.path.join(workdir, "paras.json"), encoding="utf-8"))
+    expected = sum(len(re.findall(r"\u27e6EQ:[^\u27e7]+\u27e7", p)) for p in paras)
     got = reported["formulas_display"] + reported["formulas_inline"]
-    if got != total:
-        problems.append("D5: 公式数 %d 与输入 %d 不符" % (got, total))
+    if got != expected:
+        problems.append("D5: 公式数 %d 与正文占位符 %d 不符" % (got, expected))
     if reported.get("unresolved_placeholders"):
         problems.append("D5: 有 %d 处占位符未解析" % reported["unresolved_placeholders"])
     if reported.get("formulas_missing"):
@@ -116,6 +122,11 @@ def make_synthetic(workdir):
         "应力场⟦EQ:e3.bin⟧",                        # 尾部紧贴中文
         "⟦EQ:e4.bin⟧，",                            # 公式 + 标点
         "长公式混排⟦EQ:e5.bin⟧收尾",                  # 超长 → 应升格 display
+        # 超长公式把句子劈成两半时，前半段里的行内公式也必须补上中文边界。
+        # 实测漏掉这条 flush 路径时：只要段落里有个超长公式，前半段的公式就
+        # 全变成「$公式$中文」，且阈值越小（劈开越多）越明显——阈值 40 时
+        # 一份真实文档冒出 3 条 T10 警告。这里复用一个短式 + 超长式。
+        "前面有公式⟦EQ:e3.bin⟧紧贴中文，然后是很长的⟦EQ:e5.bin⟧再收尾",
     ]
     json.dump(paras, open(os.path.join(workdir, "paras.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
@@ -138,23 +149,26 @@ def make_synthetic(workdir):
 def main():
     failures = []
 
-    print("== A. 合成段落：结构与边界 ==")
+    print("== A. 合成段落：结构与边界（多个阈值都要成立）==")
     work = os.path.join(os.environ.get("TMPDIR", "/tmp"), "d2m-display-syn")
     latex_path = make_synthetic(work)
-    reported = run_build(work, latex_path, os.path.join(work, "out.md"))
-    # 阈值现在是用户可配的（插件配置 longTexChars 或单次调用参数）。
-    # 必须用 build 回报的实际阈值，不能在这里写死：写死会让用户一改配置、
-    # 这个测试就误报 D3——那是测试的错，不是产物的错。
-    limit = reported.get("long_tex_chars", 80)
-    problems, stats = analyse(os.path.join(work, "out.md"), limit)
-    problems += build_stats_ok(work, reported)
-    print("  阈值 %d  行内 %d / display %d / 最长行内 %d 字符"
-          % (limit, stats["inline"], stats["display"], stats["max_inline_len"]))
-    for p in problems:
-        print("  FAIL " + p)
-    if not problems:
-        print("  ok   全部判据通过")
-    else:
+    # 阈值现在是用户可配的。既不能写死成一个值（用户改配置就误报），
+    # 也不能只测默认值——边界 bug 恰恰在阈值变小时才暴露（劈开越多，
+    # 走 flush 路径的段落越多）。所以扫一遍代表性取值。
+    for limit in (40, 80, 150, 300):
+        reported = run_build(work, latex_path, os.path.join(work, "out_%d.md" % limit),
+                             long_tex_chars=limit)
+        got = reported.get("long_tex_chars")
+        if got != limit:
+            failures.append("A: 传入 threshold=%d，build 回报 %s" % (limit, got))
+            continue
+        problems, stats = analyse(os.path.join(work, "out_%d.md" % limit), limit)
+        problems += build_stats_ok(work, reported)
+        print("  阈值 %3d  行内 %3d / display %3d / 最长行内 %3d 字符  → %s"
+              % (limit, stats["inline"], stats["display"], stats["max_inline_len"],
+                 "ok" if not problems else "%d 项问题" % len(problems)))
+        for p in problems:
+            print("    FAIL " + p)
         failures += problems
     shutil.rmtree(work, ignore_errors=True)
 

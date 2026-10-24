@@ -7,19 +7,22 @@
 
 产出（全部落在 <outdir>）:
     paras.json      段落列表，公式位置标为 ⟦EQ:oleObjectN.bin⟧
-    eq_index.json   公式索引：stream / img / media / bytes / variant
+    eq_index.json   公式索引：stream / img / bytes / variant / pairing
     media/          从 docx 抽出的公式预览图（EMF/WMF 原格式）
     summary.json    统计摘要（供工具层直接返回给模型）
 
 设计要点:
     * 公式在 document.xml 中以 <o:OLEObject> 出现，按出现顺序替换为占位符
-    * 预览图通过同段落内 <v:imagedata> 的 rId 关联到 media 文件
+    * 预览图按 OLEObject 的 ShapeID 精确配对到带 o:ole="t" 的 <v:shape>，
+      再从该 shape 的 <v:imagedata> 取 rId。不依赖顺序，不受同段落插图干扰。
+      ShapeID 缺失时才退回「同段落第 k 个公式配第 k 张图」，并把结果标为
+      pairing="ordinal"，让调用方知道这张图未经确认。
     * MTEF 变体由 Equation Native 流前几字节判定：
         A = 起始 0x03，可解出字符（但会丢结构，只能做交叉校验）
         B = 起始 05 00 00 06 07 "DSMT6"，不可解，必须走 EMF→内嵌PDF 或看图
-    * 故意不解码 MTEF 文本：变体 A 的解码结果丢结构严重（实测 151 字符的
-      公式只解出 2 个字符），把它当"答案"会产出错误文档。字符解码仅作
-      交叉校验用，由 --mtef 开关单独触发。
+    * 本脚本不解码 MTEF 文本，也没有解码开关：变体 A 的解码结果丢结构严重
+      （实测 151 字符的公式只解出 2 个字符），把它当"答案"会产出错误文档。
+      变体判定只用于告诉调用方「这个公式能不能只靠字符」——答案是不能。
 """
 import io
 import json
@@ -95,8 +98,13 @@ def main():
 
     # 清掉上一次转换留下的产物。不复用旧目录内容：换一份文档复用同一个
     # outDir 时，残留的 media/ 会混进这次的图，导致公式与预览图错配。
+    #
+    # headings.json 也必须清：它是上一份文档**人工确认过**的段落索引 → 标题级别。
+    # 段落号对另一份文档毫无意义，而 build.py 只要看到它存在就直接采用
+    # （heading_source="headings.json"），于是新文档的标题会挂到错误的段落上，
+    # 且不会有任何提示。宁可清掉让人重新确认一次。
     for stale in ("paras.json", "eq_index.json", "summary.json",
-                  "build_report.json", "headings_suggested.json"):
+                  "build_report.json", "headings_suggested.json", "headings.json"):
         p_stale = os.path.join(outdir, stale)
         if os.path.exists(p_stale):
             os.remove(p_stale)
@@ -128,18 +136,45 @@ def main():
     with open(os.path.join(outdir, "paras.json"), "w", encoding="utf-8") as f:
         json.dump(paras, f, ensure_ascii=False, indent=1)
 
-    # ---- 2. 公式 → 预览图映射（逐段配对，保持出现顺序）----
-    # rel_map 的 Target 形如 "media/image49.wmf"（相对 word/），
-    # 这里分别保存完整相对路径（用于取 zip 条目）和文件名（用于输出）。
+    # ---- 2. 公式 → 预览图映射 ----
+    # rel_map 的 Target 形如 "media/image49.wmf"（相对 word/）。
+    #
+    # 主路径：按 ShapeID 精确配对。
+    #   公式的预览图是一个带 o:ole="t" 的 v:shape，它的 id 等于 OLEObject 的
+    #   ShapeID。这是唯一可靠的联系——不依赖顺序、不受同段落其他插图干扰。
+    #
+    # 早期版本按「同段落第 k 个 OLEObject ↔ 第 k 张 v:imagedata」配对，实测在
+    # 真实文档上会错位：段落里公式之前夹着程序截图时，整个下标右移，把插图
+    # 的位图当成公式预览图交给模型去读，而且不报错。实测 145 个公式里有 10 个
+    # 被配成 VDDD3D 程序截图/位错环三维图。
+    #
+    # 回退：ShapeID 缺失或对不上时（少数生成器不写 ShapeID），退回下标配对，
+    # 但把结果标记为 unverified，让 summary 能报出来。
+    shape_preview = {}          # shape id -> media target
+    for p in body.iter(W + "p"):
+        for sh in p.iter(V + "shape"):
+            if sh.get(O + "ole") != "t":
+                continue
+            ims = list(sh.iter(V + "imagedata"))
+            if ims:
+                shape_preview[sh.get("id")] = rel_map.get(ims[0].get(R + "id"))
+
     pairs = {}
+    pairing = {}                # stream -> "shape-id" | "ordinal"
     for p in body.iter(W + "p"):
         imgs = [i.get(R + "id") for i in p.iter(V + "imagedata")]
         for k, obj in enumerate(p.iter(O + "OLEObject")):
             oid = (rel_map.get(obj.get(R + "id")) or "?").split("/")[-1]
-            if k < len(imgs):
+            target = shape_preview.get(obj.get("ShapeID"))
+            if target:
+                pairs[oid] = target
+                pairing[oid] = "shape-id"
+            elif k < len(imgs):
                 pairs[oid] = rel_map.get(imgs[k]) or None      # "media/image49.wmf"
+                pairing[oid] = "ordinal"
             else:
                 pairs[oid] = None
+                pairing[oid] = "none"
 
     # ---- 3. 抽取预览图到 media/ ----
     media_dir = os.path.join(outdir, "media")
@@ -155,6 +190,11 @@ def main():
             extracted.add(zpath)
 
     # ---- 4. 公式索引 ----
+    def img_of(base):
+        """pairs 里存的是 'media/image49.wmf'，索引里统一用文件名。"""
+        target = pairs.get(base)
+        return os.path.basename(target) if target else None
+
     rows = []
     for name in sorted([n for n in names
                         if n.startswith("word/embeddings/") and n.endswith(".bin")],
@@ -165,17 +205,19 @@ def main():
         except Exception as exc:            # 损坏的 OLE 不应中断整批提取
             rows.append({
                 "stream": base,
-                "img": pairs.get(base),
+                "img": img_of(base),
                 "bytes": 0,
                 "variant": "ERROR",
+                "pairing": pairing.get(base, "none"),
                 "error": str(exc),
             })
             continue
         rows.append({
             "stream": base,
-            "img": os.path.basename(pairs[base]) if pairs.get(base) else None,
+            "img": img_of(base),
             "bytes": len(eq),
             "variant": mtef_variant(eq),
+            "pairing": pairing.get(base, "none"),
         })
 
     with open(os.path.join(outdir, "eq_index.json"), "w", encoding="utf-8") as f:
@@ -187,6 +229,8 @@ def main():
     for r in rows:
         counts[r["variant"]] = counts.get(r["variant"], 0) + 1
     no_media = [r["stream"] for r in rows if not r.get("img")]
+    # 靠下标回退配上的公式：图可能是插图的位图，必须让人知道。
+    by_ordinal = [r["stream"] for r in rows if r.get("pairing") == "ordinal"]
 
     summary = {
         "paragraphs": len(paras),
@@ -195,13 +239,24 @@ def main():
         "variants": counts,
         "media_extracted": len(extracted),
         "formulas_without_media": len(no_media),
+        "formulas_paired_by_shape_id": sum(1 for r in rows if r.get("pairing") == "shape-id"),
+        "formulas_paired_by_ordinal": len(by_ordinal),
         "next": (
-            "全部公式都有预览图，可逐张读图转写 LaTeX。"
-            if not no_media else
-            "有 %d 个公式没有预览图（%s），只能靠 MTEF 或原始 Word 补齐。"
-            % (len(no_media), ", ".join(no_media[:5]))
+            "全部公式都有按 ShapeID 确认的预览图，可逐张读图转写 LaTeX。"
+            if not no_media and not by_ordinal else
+            ("有 %d 个公式没有预览图（%s），只能靠 MTEF 或原始 Word 补齐。"
+             % (len(no_media), ", ".join(no_media[:5])))
+            if no_media else
+            ("有 %d 个公式的预览图是按出现顺序回退配上的（%s），"
+             "无法确认它们不是同段落插图的位图；读图前建议先核对。"
+             % (len(by_ordinal), ", ".join(by_ordinal[:5])))
         ),
     }
+    if by_ordinal:
+        summary["pairing_warning"] = (
+            "这些公式的文档里找不到 o:ole=\"t\" 的 v:shape（或 ShapeID 不匹配），"
+            "退回了「同段落第 k 个公式配第 k 张图」。若段落内有插图，配到的可能是插图。"
+        )
     with open(os.path.join(outdir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=1)
 

@@ -79,9 +79,25 @@ docx2md_extract(path="文档.docx", outDir="work/")
 
 产出：
 - `paras.json` —— 正文段落，公式位置是 `⟦EQ:oleObject12.bin⟧` 占位
-- `eq_index.json` —— 每个公式的 stream 名、预览图、字节数、变体
+- `eq_index.json` —— 每个公式的 stream 名、预览图、字节数、变体、`pairing`
 - `media/` —— 原始矢量图（EMF/WMF）
 - `png/` —— 可读位图（**读这个目录**）
+
+**读图前先看 `summary.json` 的两个字段，它们决定这些图能不能信：**
+
+| 字段 | 含义 | 该怎么办 |
+|---|---|---|
+| `formulas_paired_by_shape_id` | 按 `o:ole="t"` 的 shape 精确配到的公式数 | 这是可信的，直接读 |
+| `formulas_paired_by_ordinal` | 找不到 ShapeID、退回「同段落第 k 个公式配第 k 张图」的数量 | **不可信**，见下 |
+
+`pairing` 字段写在 `eq_index.json` 每一条里（`shape-id` / `ordinal` / `none`）。
+出现 `ordinal` 时，说明文档没写 `ShapeID`，那张图可能是**同段落里插图的位图**
+而不是公式——插件无法区分，只会如实告诉你它不确定。这种公式要么放大核对图里
+到底是不是公式，要么回原 Word 看。`none` 则是真的没有预览图。
+
+> 这条不是洁癖：早期版本一律按顺序配对，在公式前面夹着插图的段落里整体错位，
+> 实测一份 145 公式的文档错了 10 个，而且**没有任何提示**——模型会把程序截图
+> 读成"公式"，产出一个看起来完整、实则全错的结果。
 
 ### 第 3 步：读图转写 LaTeX（核心）
 
@@ -246,6 +262,7 @@ EOF
 | 公式数量比预期少 | 占位符没被替换，或原文本身漏了 |
 | 段落里出现孤立的 `，` 或 `。` | 公式被拆成块后，标点留在了外面 |
 | 编号重复或跳号 | 局部修补了编号（见第四节） |
+| 读出的"公式"其实是截图/示意图 | `summary.formulas_paired_by_ordinal > 0`：那张图是退回顺序配对配上的，未经确认（见第 2 步） |
 | 中文变成 `����`，或出现 U+FFFD | Python 输出编码不是 UTF-8。正常情况下插件已在进程层与脚本层各夹一道（`pyEnv()` + `force_utf8_stdio()`）；若仍出现，说明有人绕过插件直接跑了 `py/*.py`，或用了改过的解释器 —— 先跑 `node test/encoding.mjs` 定位 |
 
 > 判据：`missing_preview_context[].paragraph_text` 必须能读出汉字。这是判断

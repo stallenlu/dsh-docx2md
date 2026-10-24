@@ -5,7 +5,6 @@
  */
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -53,13 +52,23 @@ console.log('\n== 3. render ==')
 const ren = await py('render.py', [join(work, 'media'), join(work, 'png'), '--max-width', '1600'], work)
 console.log(ren.out.trim())
 
+// 这份 LaTeX 表由本测试自己生成，放在 work 目录里。
+// 早先写死了 /tmp/latex_by_stream.json —— 那是手工留在开发机上的文件，
+// 仓库里没有任何东西会创建它，于是别人 clone 后跑这个测试必然在第 5 步失败。
+// 内容只是占位（\alpha_{...}），用途是验证 build 链路能跑通，不涉及数学正确性。
+const latexPath = join(work, 'latex.json')
+const eqIndex = JSON.parse(await readFile(join(work, 'eq_index.json'), 'utf8'))
+const latex = {}
+for (const row of eqIndex) latex[row.stream] = `\\alpha_{${row.stream.replace(/\D/g, '')}}`
+await writeFile(latexPath, JSON.stringify(latex, null, 1), 'utf8')
+
 console.log('\n== 4. build (suggest) ==')
-const sug = await py('build.py', [work, '--latex', '/tmp/latex_by_stream.json',
+const sug = await py('build.py', [work, '--latex', latexPath,
   '--out', join(work, 'out.md'), '--suggest'], work)
 console.log(sug.out.trim())
 
 console.log('\n== 5. build ==')
-const bld = await py('build.py', [work, '--latex', '/tmp/latex_by_stream.json',
+const bld = await py('build.py', [work, '--latex', latexPath,
   '--out', join(work, 'out.md'), '--use-suggested'], work)
 if (bld.code !== 0) { console.error(bld.err); process.exit(1) }
 const b = JSON.parse(bld.out.trim())

@@ -11,13 +11,14 @@
 
 检查项（对应 METHODOLOGY 的六条铁律 + 结构校验）:
     T1  $$ 必须独占一行
-    T2  行内公式不得跨行 / 不得含 \\begin{aligned} 等块级环境
+    T2  行内公式不得跨行 / 不得含块级环境 / 不得含 \\ 与 &（见铁律 2）
     T3  相邻公式之间必须有空行或正文
     T4  \\tag 必须紧跟 \\end{aligned}（或 \\end{array} 等）
-    T5  表格单元格内不得出现超长公式
+    T5  表格单元格内不得出现超长公式（T5_MAX_CELL_FORMULA 字符以上）
     T6  图片占位应为 HTML 注释
     T7  $$ 配对数为偶数（成对闭合）
     T8  公式编号连续、无重复（可选，--expect-formulas 时检查总数）
+    T9  不得残留未解析的公式占位符或「未解析公式」注释
 """
 import argparse
 import json
@@ -27,6 +28,33 @@ from docxfile import force_utf8_stdio
 
 BLOCK_ENVS = ("aligned", "array", "matrix", "pmatrix", "bmatrix",
               "cases", "split", "gather", "align", "eqnarray")
+
+# 表格单元格里的公式字符数上限。SKILL.md 与 README 的铁律 5 写的是
+# 「超过约 60 字符就移出表格」，这里就用 60 —— 早先实现是 400，与文档不符，
+# 于是 100 字符的公式塞进单元格也能拿到 PASS。
+T5_MAX_CELL_FORMULA = 60
+
+# 行内公式里不允许出现的字符：换行由正则的 [^$\n] 挡住，这里管 \\ 与 &。
+# 铁律 2 原文：`$...$` 里不能出现 `\begin{aligned}`、`\\`、`&`。
+#   - `\\`（LaTeX 换行）会让行内公式在渲染器里断行
+#   - `&`（对齐符）只在 aligned/array 环境里有意义，出现在行内就是结构错位
+# 注意 `\{`、`\}`、`\&` 是转义的字面量，必须排除，否则会误报。
+INLINE_BAD_LINEBREAK = re.compile(r"(?<!\\)\\\\")      # 未被转义的 \\
+INLINE_BAD_ALIGN = re.compile(r"(?<!\\)&")              # 未被转义的 &
+
+
+def _inline_bodies(line):
+    """找出这一行里所有行内公式（$...$）的内容。"""
+    return [m.group(1) for m in re.finditer(r"(?<!\$)\$([^$\n]+)\$(?!\$)", line)]
+
+
+def _cell_formula_lengths(line):
+    """表格行里每个单元格内公式的 LaTeX 长度（不含 $ 定界符本身）。"""
+    out = []
+    for cell in line.strip().strip("|").split("|"):
+        for m in re.finditer(r"\$([^$]+)\$", cell):
+            out.append((cell.strip(), len(m.group(1))))
+    return out
 
 
 def check(md_lines):
@@ -44,16 +72,26 @@ def check(md_lines):
             # 允许行尾紧跟 \tag 的收尾行？不：收尾 $$ 必须独占
             errors.append("T1: 第 %d 行 $$ 未独占一行: %s" % (i, s[:90]))
 
-        # T2: 行内公式不得含块级环境
-        for m in re.finditer(r"(?<!\$)\$([^$\n]+)\$(?!\$)", ln):
-            body = m.group(1)
+        # T2: 行内公式不得含块级环境，也不得含 \\ 与 &
+        for body in _inline_bodies(ln):
             if "\\begin{" in body:
                 errors.append("T2: 第 %d 行行内公式含块级环境: %s" % (i, body[:80]))
+            elif INLINE_BAD_LINEBREAK.search(body):
+                errors.append(
+                    "T2: 第 %d 行行内公式含 \\\\（换行符），应改用 $$ 块: %s"
+                    % (i, body[:80]))
+            elif INLINE_BAD_ALIGN.search(body):
+                errors.append(
+                    "T2: 第 %d 行行内公式含未转义的 &（对齐符），应改用 $$ 块: %s"
+                    % (i, body[:80]))
 
         # T5: 表格行里的超长公式
         if s.startswith("|") and s.count("|") >= 2:
-            if len(ln) > 400 and ("$" in ln):
-                warns.append("T5: 第 %d 行表格单元格含长公式（%d 字符）" % (i, len(ln)))
+            for cell, texlen in _cell_formula_lengths(s):
+                if texlen > T5_MAX_CELL_FORMULA:
+                    warns.append(
+                        "T5: 第 %d 行表格单元格内公式 %d 字符（上限 %d），建议移出表格: %s"
+                        % (i, texlen, T5_MAX_CELL_FORMULA, cell[:60]))
 
         # T6: 图片占位
         if re.search(r"!\[[^\]]*\]\(\s*\)", ln):
@@ -169,4 +207,3 @@ def main():
 if __name__ == "__main__":
     force_utf8_stdio()
     main()
-# x

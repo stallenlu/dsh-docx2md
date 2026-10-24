@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.1.2
+
+### 修复
+
+- **公式配错了预览图，而且是静默的**。旧实现按「同段落第 k 个 `OLEObject`
+  ↔ 第 k 张 `v:imagedata`」配对。只要公式前面夹着一张插图，下标就整体右移，
+  于是把插图的位图当成公式预览图交给模型去读——不报错、不告警。实测在一份
+  145 个公式的真实文档里错了 10 个（配成了 VDDD3D 程序截图与位错环三维图），
+  而 `summary` 只统计「没图」的公式，看不见「配错图」。
+
+  现在按 `OLEObject` 的 `ShapeID` 精确配对到带 `o:ole="t"` 的 `v:shape`，
+  再由该 shape 的 `imagedata` 取图。同一份文档实测 145/145 精确命中，
+  `formulas_without_media` 从 8 降到 0。文档不写 `ShapeID` 时才退回下标配对，
+  并在 `summary.formulas_paired_by_ordinal`、`pairing_warning` 与 `next` 里
+  明确报出「这些图未经确认」。
+
+- **校验器对铁律 2、5 的两个条款根本没查**。`validate.py` 的 docstring 写着
+  T2 要查「行内公式不得含 `\\`」，铁律 2 原文也列了 `\\` 与 `&`，但正则只查了
+  `\begin{`。于是 `$a \\ b$` 与 `$a & b$` 都拿到 PASS。现已补齐，并排除
+  `\&`、`\{`、`\}` 这类转义，避免误报。
+
+- **T5 的阈值与文档不符**。铁律 5 说「超过约 60 字符就移出表格」，实现查的是
+  行长度 400，于是 100 字符的公式塞进单元格也通过。现在按单元格内公式自身的
+  LaTeX 长度与 60 比较，并在告警里给出实际字符数。
+
+- **复用 `outDir` 时 `headings.json` 不被清理**。它是上一份文档人工确认过的
+  「段落索引 → 标题级别」，段落号对另一份文档毫无意义；而 `build.py` 只要看到
+  它存在就直接采用（`heading_source="headings.json"`），于是新文档的标题会
+  挂到错误的段落上，且无声。现已纳入清理清单。
+
+- **`test/smoke.mjs` 依赖仓库外文件**。它写死 `--latex /tmp/latex_by_stream.json`，
+  这个文件只在开发机上手工存在过，仓库里没有任何东西会创建它；别人 clone 后
+  跑该测试必然在第 5 步失败。现在由测试自己从 `eq_index.json` 生成映射表。
+
+- 清掉 `py/render.py` 末行的 `# drift-test` 与 `py/validate.py` 末行的 `# x`。
+
+### 文档
+
+- README 的 `formulas_without_preview` 更正为实际字段名
+  `formulas_without_media`；「失败时不会留下空目录」限定为 Python 脚本层
+  （工具层会先按 `outDir` 建目录再校验），并补充配对规则与清理 `headings.json`
+  两条已知行为。
+
+### 测试
+
+- 新增 `test/pairing_selftest.py`：用合成 docx 钉死配对规则——有 `ShapeID` 时
+  段落内夹插图也能配到真正的公式图；无 `ShapeID` 时退回下标配对且必然告警。
+- `validate_selftest.py` 增补 T2（`\\`、`&`、转义放行）与 T5（警告级）反例。
+- `run-all.sh` 接入配对自测，并把「T0–T8」更正为「T0–T9」。
+
 ## 0.1.1
 
 ### 修复

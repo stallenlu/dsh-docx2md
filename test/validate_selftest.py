@@ -38,6 +38,17 @@ $$E = mc^2$$
     ("T2 行内公式含块级环境", r"""正文 $\begin{aligned} a &= b \end{aligned}$ 结束。
 """, "FAIL"),
 
+    # 铁律 2 原文是「不能出现 \begin{aligned}、\\、&」。只查 \begin{} 会漏掉后两者，
+    # 于是带 \\ 或 & 的行内公式拿到 PASS。这里为每条各钉一个反例。
+    ("T2 行内公式含 \\\\（换行符）", "正文 $a \\\\ b$ 结束。\n", "FAIL"),
+
+    ("T2 行内公式含未转义的 &", "正文 $a & b$ 结束。\n", "FAIL"),
+
+    # 转义后的字面量是合法 LaTeX，不能误报。
+    ("转义的 \\& 应放行", "正文 $a \\& b$ 结束。\n", "PASS"),
+
+    ("转义的花括号应放行", "正文 $\\{x\\}$ 结束。\n", "PASS"),
+
     ("T3 相邻公式块紧贴", """$$
 a
 $$
@@ -103,6 +114,22 @@ $$
 
 这是一段普通文字，没有公式，长度也正常。
 """, "PASS"),
+
+    # 铁律 5：表格单元格里的公式超过约 60 字符就该移出表格。
+    # 早先实现把阈值写成 400，于是 100 字符的公式塞进单元格也拿到 PASS——
+    # 文档说 60、代码查 400，这种不一致比没有检查更糟。
+    ("T5 表格单元格内 100 字符公式", "| 量 | 含义 |\n|---|---|\n| $%s$ | 说明 |\n"
+     % ("A" * 100), "PASS"),
+]
+
+# T5 是警告级：它不该把文档判死，但必须真的报出来。
+WARN_CASES = [
+    ("T5 表格单元格内 100 字符公式应产生警告",
+     "| 量 | 含义 |\n|---|---|\n| $%s$ | 说明 |\n" % ("A" * 100),
+     "T5"),
+    ("T5 表格单元格内 10 字符公式不应警告",
+     "| 量 | 含义 |\n|---|---|\n| $%s$ | 说明 |\n" % ("A" * 10),
+     None),
 ]
 
 
@@ -117,9 +144,9 @@ def run_case(content):
         import json
         try:
             report = json.loads(r.stdout)
-            return report.get("status"), report.get("errors", [])
+            return report.get("status"), report.get("errors", []), report.get("warnings", [])
         except json.JSONDecodeError:
-            return "CRASH", [r.stderr.strip()[:200]]
+            return "CRASH", [r.stderr.strip()[:200]], []
     finally:
         os.remove(path)
 
@@ -128,13 +155,23 @@ def main():
     failures = 0
     print("== validate.py 自测 ==")
     for name, content, expect in CASES:
-        got, errors = run_case(content)
+        got, errors, _warns = run_case(content)
         ok = got == expect
         print(("  PASS  " if ok else "  FAIL  ") + f"{name}: 期望 {expect}，实际 {got}")
         if not ok:
             failures += 1
             for e in errors[:3]:
                 print("         " + str(e)[:120])
+
+    print("\n== T5 警告级检查 ==")
+    for name, content, expect_marker in WARN_CASES:
+        _status, _errors, warns = run_case(content)
+        hit = any(w.startswith(expect_marker) for w in warns) if expect_marker else not warns
+        print(("  PASS  " if hit else "  FAIL  ") + name)
+        if not hit:
+            failures += 1
+            print("         实际 warnings: " + str(warns[:2])[:160])
+
     print()
     if failures:
         print(f"{failures} 项不符合预期——校验器需要检查")

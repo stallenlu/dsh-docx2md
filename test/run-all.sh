@@ -55,8 +55,12 @@ step "6. skill 契约（按 dsh-skill 真实校验复刻）"
 node test/skill-contract.mjs | tail -3
 note $?
 
-step "7. 校验器自测（T0–T8 每条规则都有反例）"
+step "7. 校验器自测（T0–T9 每条规则都有反例）"
 python3 test/validate_selftest.py | tail -3
+note $?
+
+step "7b. 公式↔预览图配对（ShapeID 优先，回退必告警）"
+python3 test/pairing_selftest.py | tail -2
 note $?
 
 step "8. 边界输入"

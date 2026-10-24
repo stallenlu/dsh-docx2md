@@ -537,15 +537,24 @@ node test/encoding.mjs 真实文档.docx    # 再验一份中文文档
 - **EMF 内嵌 PDF 文字层未实现**。「三种手段」一节里提到这条路径（★★★★，
   变体 B 的解法），但它在原始实验里是手工做的一步，没有固化进本插件；`pypdf`
   目前只是预留依赖，`py/` 下零引用。因此 15/145 的变体 B 公式只能靠渲染图读，
-  读不清时 `extract` 会报出 `formulas_without_preview`，不会假装成功。
+  读不清时 `extract` 的 `summary.formulas_without_media` 会报出数量，不会假装成功。
   详见 [docs/methodology.md](docs/methodology.md) 开头的说明。
 
 - **只吃 `.docx`**。旧 `.doc` 请先用 Word / WPS 另存。非 zip、空 zip、缺
   `word/document.xml`、加密文档都会给出可读错误并以退出码 3 结束。
-  **失败时不会留下空目录**：文档校验在建目录之前。
+  **Python 脚本失败时不会留下空目录**（文档校验在建目录之前）；但工具层
+  `docx2md_extract` 会先按 `outDir` 建目录再调用脚本，所以经工具调用时可能
+  留下一个空目录——里面不会有任何产物。
 - **同一 outDir 会被清理**。换文档复用目录时，旧的 `paras.json`/`media/`/`png/`
-  会被删除，避免公式与预览图错配。
+  以及**人工确认过的 `headings.json`** 都会被删除——段落号对另一份文档没有意义，
+  留着会让新文档的标题挂到错误的段落上。
 - **无预览图的公式无法自动转换**。`inspect` 会报出数量，需要看原 Word 手工补。
+- **预览图必须按 ShapeID 配对，不能按顺序**。公式的预览图是带 `o:ole="t"` 的
+  `v:shape`，其 `id` 等于 `OLEObject` 的 `ShapeID`。早期实现按「同段落第 k 个
+  公式配第 k 张图」，在公式前面夹着插图的段落里会整体错位，把插图位图当成公式
+  预览图交给模型去读（实测 145 个公式里错 10 个，且不报错）。现在优先按
+  `ShapeID` 配对；只有文档不写 `ShapeID` 时才退回下标配对，并在
+  `summary.formulas_paired_by_ordinal` 与 `pairing_warning` 里明确报出来。
 - **标题层级需要人工确认**。中文文档 `1．` / `A）` / `i）` / 无编号「引言」混用是常态，
   自动识别只作为初稿。
 - **插图不在处理范围**。文档里的示意图需要在 Markdown 里留 `<!-- 图 N -->` 占位，
@@ -571,7 +580,7 @@ dsh-docx2md/
 │   └── SKILL.md       技能说明（给 Agent 读）
 ├── docs/
 │   └── methodology.md 完整方法论（转换实验总结）
-├── test/              21 组测试（不进发布包）
+├── test/              22 组测试（不进发布包）
 ├── cordis.patch.yml   插件注册
 └── CHANGELOG.md
 ```

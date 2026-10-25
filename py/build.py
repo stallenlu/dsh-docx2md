@@ -8,10 +8,12 @@
 
 输入:
     <workdir>/paras.json        extract.py 的产出
-    <workdir>/eq_index.json     extract.py 的产出
+    <workdir>/eq_index.json     extract.py 的产出；OMML 条目带 latex 字段，
+                                这里自动预填（latex.json 给同名键时以它为准）
     <workdir>/headings.json     （可选）{"段落索引": 级别}，人工确认过的标题
     <workdir>/headings_suggested.json  --suggest 生成，供人工修订后改名生效
     <latex.json>                {"oleObject1.bin": "$...$", ...}
+                                纯 OMML 文档可以是 {}（全部走预填）
 
 输出:
     <output.md>                 最终 Markdown
@@ -233,6 +235,19 @@ def main():
         heading_source = "auto-suggested (未确认，建议先 --suggest 再人工修订)"
 
     known = {r["stream"] for r in index}
+
+    # ---- OMML 公式预填 ----
+    # extract.py 已把 Word 原生公式（OMML）从 XML 确定性转成 LaTeX，
+    # 带在 eq_index.json 的 latex 字段里。这里预填进公式表；
+    # Agent 的 latex.json 若给了同名键，以 Agent 为准（允许纠正转得不满
+    # 意的条目）。不预填的话，OMML 公式会被记成 missing → T9 FAIL，
+    # 而它们根本不需要读图。
+    omml_prefilled = 0
+    for r in index:
+        if r.get("kind") == "omml" and r.get("latex") and not latex.get(r["stream"]):
+            latex[r["stream"]] = r["latex"]
+            omml_prefilled += 1
+
     missing = sorted([k for k in known if k not in latex])
 
     out = []
@@ -241,7 +256,8 @@ def main():
              "unresolved_placeholders": 0, "heading_source": heading_source,
              # 回报实际生效的阈值：调用方据此确认参数有没有传进来，
              # 也便于事后复现「这一版用的是哪个值」。
-             "long_tex_chars": args.long_tex_chars}
+             "long_tex_chars": args.long_tex_chars,
+             "omml_prefilled": omml_prefilled}
 
     prev_display = False
 

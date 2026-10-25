@@ -7,6 +7,10 @@
 
 输出（stdout，单个 JSON），主要字段:
     paragraphs / formulas / embeddings
+    formulas            OLE 公式数（与 extract 的 formulas 同口径）
+    formulas_omml       Word 原生公式（OMML）数——extract 阶段确定性转出
+                        LaTeX，不需要读图；不计入 formulas
+    formulas_total      两族之和（expectFormulas 用它）
     variants            公式的 MTEF 变体分布（A 可解字符 / B 必须看图）
     formulas_with_preview, formulas_without_preview
     media_formats       预览图的实际格式分布（wmf/emf/png/jpeg）
@@ -36,6 +40,7 @@ W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 V = "{urn:schemas-microsoft-com:vml}"
 O = "{urn:schemas-microsoft-com:office:office}"
+M = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
 
 def natkey(name):
@@ -124,6 +129,12 @@ def main():
             else:
                 pairs[oid] = None
 
+    # Word 原生公式（OMML）：新版 Word 的默认格式，结构化 XML，
+    # extract 阶段可确定性转成 LaTeX，不需要读图。inspect 必须报出来，
+    # 否则纯 OMML 文档会显示 formulas: 0 —— 用户以为「没有公式」，
+    # 实际是「有一族本工具此前不认识」。
+    n_omml = sum(1 for _ in body.iter(M + "oMath"))
+
     # 变体统计
     variants = {}
     conv_errors = []
@@ -188,15 +199,29 @@ def main():
 
     result = {
         "paragraphs": n_para,
+        # formulas 保持「OLE 公式数」的语义不变（现有测试与调用方依赖它）；
+        # OMML 单独报，避免把两个族混进一个数字里掩盖差异。
         "formulas": n_eq,
+        "formulas_omml": n_omml,
+        "formulas_total": n_eq + n_omml,
         "embeddings": len(embeds),
         "variants": variants,
         "formulas_with_preview": with_preview,
         "formulas_without_preview": without,
         "media_formats": media_formats,
         "has_ole_objects": n_eq > 0,
+        "has_omml": n_omml > 0,
         "render_engines": eng,
     }
+    if n_omml:
+        result["omml_note"] = (
+            "有 %d 个 Word 原生公式（OMML）。它们是结构化 XML，extract 阶段"
+            "会确定性转成 LaTeX（eq_index.json 的 latex 字段），无需读图。"
+            % n_omml)
+    if n_eq == 0 and n_omml == 0:
+        result["no_formulas_note"] = (
+            "两族公式（OLE / OMML）都没有检测到。若文档肉眼可见有公式，"
+            "可能是图片式公式或第三方编辑器私有格式，本工具不覆盖。")
     if without:
         result["missing_preview_count"] = without
         result["missing_preview_context"] = missing_context

@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.2.0
+
+### 新增：支持 Word 原生公式（OMML）
+
+docx 里的公式有两族，此前只支持一族：
+
+| | OLE 公式 | OMML（Word 原生） |
+|---|---|---|
+| 谁在用 | Equation Editor / MathType、WPS 默认 | Word 2007+ 默认；2016 后手敲 LaTeX 存下来也是它 |
+| 存储 | 私有二进制 MTEF（`oleObjectN.bin`） | 结构化 XML（`m:oMath`） |
+| 此前行为 | 渲染 PNG → 读图转写 | **静默丢失** |
+
+修复前的实测：一份含 3 个 OMML 公式的文档，`inspect` 报 `formulas: 0`，
+`extract` 的正文变成「设比值，且平方项为」——公式连同结构一起无声消失。
+这是本插件最坏的一类失败（不报错、不完整、还看起来正常）。
+
+现在：
+- **`py/omml.py`**：OMML → LaTeX 确定性转换器。分式（含 linear）、上下标、
+  根式（含 n 次）、定界符、大运算符（∑∏∫…）、函数名、重音（hat/vec/…）、
+  横线、矩阵、方程组、underset/overset、纯文本样式（`\text{}`）、希腊字母
+  与常用符号的 Unicode→命令映射。未知结构降级为拼接子节点——宁可少一层
+  装饰，绝不丢内容、绝不抛异常（`limLow` 的 `m:lim` 双重身份曾实测触发
+  崩溃，已修）。
+- **`extract.py`**：OMML 生成 `⟦EQ:ommlK⟧` 占位符，LaTeX 直接写进
+  `eq_index.json` 的 `latex` 字段（`kind:"omml"`、`pairing:"xml"`）。
+- **`build.py`**：自动预填 OMML 的 LaTeX；Agent 的 `latex.json` 给同名键时
+  以 Agent 为准（留了纠正的余地）。纯 OMML 文档用**空的** latex 表即可
+  产出完整 Markdown。
+- **`docx_scan.py`**：`formulas`（OLE）/ `formulas_omml` / `formulas_total`
+  分开报，附 `omml_note`；两族都为 0 时给 `no_formulas_note` 提示可能是
+  图片式公式。
+- **计数口径统一**：`inspect` 与 `extract` 的 `formulas` 都只数 OLE，
+  OMML 一律走 `formulas_omml`。混排文档实测两边一致（1+1=2）。
+  `expectFormulas` 传的是 `formulas_total`。
+
+### 测试
+
+- `test/omml_selftest.py`：22 类结构逐一断言（含 linear 分式加括号、
+  命令后紧跟 `_` 不补空格这类边角）。
+- `test/omml_e2e.py`：合成 OMML docx 走 inspect→extract→build→validate
+  全链路，钉死「公式绝不静默消失」。
+- `run-all.sh` 接入为 7d / 7e 两组。
+- `pack.mjs` 清单加入 `py/omml.py`（14 个文件）。
+
+### 文档
+
+- README 开头改为「两族公式，两条路」对照表；技能文档同步——
+  「以位图为准」明确限定为 OLE 族的军规，OMML 走确定性路径、
+  第 3 步（读图）对它不适用。
+
 ## 0.1.5
 
 ### 修复

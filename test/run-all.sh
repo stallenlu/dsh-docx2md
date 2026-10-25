@@ -71,6 +71,14 @@ else
 fi
 note $?
 
+step "7d. OMML→LaTeX 转换器（Word 原生公式，22 类结构）"
+python3 test/omml_selftest.py | tail -2
+note $?
+
+step "7e. OMML 端到端（合成 docx：inspect→extract→build，空 latex 表也要出公式）"
+python3 test/omml_e2e.py | tail -2
+note $?
+
 step "8. 边界输入"
 tmp=$(mktemp -d)
 printf 'not a zip' > "$tmp/fake.docx"

@@ -1,18 +1,34 @@
 # dsh-docx2md
 
-把含 **OLE 公式**的 Word 文档转成带 LaTeX 的 Markdown —— 跨平台，保留公式编号与结构。
+把含公式的 Word 文档转成带 LaTeX 的 Markdown —— 跨平台，保留公式编号与结构。
+**OLE 公式（Equation Editor / MathType）与 Word 原生公式（OMML，新版 Word 的
+默认格式）两族都支持。**
 
-A DeepSeek Harness plugin that converts Word documents with embedded OLE equations
-into Markdown with LaTeX, preserving numbering and document structure.
+A DeepSeek Harness plugin that converts Word documents with embedded equations —
+both legacy OLE (MTEF) and native OMML — into Markdown with LaTeX, preserving
+numbering and document structure.
 
 ---
 
-## 为什么需要它
+## 两族公式，两条路
+
+| | OLE 公式 | OMML（Word 原生） |
+|---|---|---|
+| 谁在用 | Equation Editor / MathType；WPS 公式的默认载体 | Word 2007+ 插入公式的默认格式；2016 后手敲 LaTeX 存下来也是它 |
+| 存在哪 | 私有二进制（MTEF）包在 `oleObjectN.bin` | 结构化 XML（`m:oMath`） |
+| 怎么转 | 渲染成 PNG → 视觉模型逐张读图转写 | **extract 阶段确定性转成 LaTeX**，不读图 |
+| 质量 | 取决于读图；有校验器与配对告警兜底 | 22 类结构逐一测试（分式/上下标/根式/矩阵/大运算符/重音/…） |
+| 需要人工 | 是（第 3 步） | 否（不满意可覆盖，见下） |
+
+纯 OMML 文档全程无需读图：`docx2md_build` 用**空的** latex 表也能产出完整
+Markdown（OMML 自动预填）。混排文档里只有 OLE 那部分需要视觉转写。
+
+## 为什么 OLE 需要看图
 
 普通的 `pandoc doc.docx -o doc.md` 遇到 Word 的 OLE 公式基本无能为力：那是
 WPS / Word 的私有二进制格式（MTEF），解出来必然失真。
 
-本插件给出的方案只有一句话：
+本插件对 OLE 公式的方案只有一句话：
 
 > **以渲染出的位图为准，不以解析出的字符为准。**
 
@@ -194,8 +210,8 @@ Agent 会加载 `docx2md` 技能，按 inspect → extract → 读图 → build 
 ```
 docx2md_inspect(path)
 ```
-只读扫描。返回段落数、公式数、变体分布（A 可解 / B 必须看图）、
-预览图格式分布、本机渲染引擎。
+只读扫描。返回段落数、公式数（分 `formulas`＝OLE 与 `formulas_omml`＝Word 原生
+两族）、变体分布（A 可解 / B 必须看图）、预览图格式分布、本机渲染引擎。
 
 **它只输出事实，不给结论。** 例如缺预览图的公式，`inspect` 会给出
 `missing_preview_context`（所在段落、段落文字、前后段），但不会替你判断
@@ -205,8 +221,10 @@ docx2md_inspect(path)
 docx2md_extract(path, outDir?, render?)
 ```
 产出：
-- `paras.json` —— 正文段落，公式位置为 `⟦EQ:oleObject12.bin⟧`
-- `eq_index.json` —— 每个公式的 stream / 预览图 / 字节数 / 变体
+- `paras.json` —— 正文段落，公式位置为 `⟦EQ:oleObject12.bin⟧`（OLE）或
+  `⟦EQ:omml3⟧`（Word 原生）
+- `eq_index.json` —— 每个公式的 stream / 预览图 / 字节数 / 变体 / `pairing`；
+  **OMML 条目直接带 `latex` 字段**（从 XML 结构确定性转出，无需读图）
 - `media/` —— 原始 EMF/WMF
 - `png/` —— 可读位图（**读这个目录**）
 
@@ -214,7 +232,8 @@ docx2md_extract(path, outDir?, render?)
 docx2md_build(workDir, latex, out, suggestHeadings?, expectFormulas?)
 ```
 把 `{"oleObject1.bin": "\\alpha", ...}` 合成 Markdown 并校验。
-`expectFormulas` 会核对公式总数，能抓住漏转。
+`expectFormulas` 会核对公式总数，能抓住漏转。OMML 公式无需出现在 latex 表里
+（自动预填；给了同名键则以你给的为准）。
 
 ### 产物落在哪、会不会留垃圾
 
@@ -453,8 +472,8 @@ node test/pack.mjs                    # 打包内容
 而且 `.npmignore` 在 `files` 白名单模式下对已纳入的目录**不生效**——这一条与
 直觉相反，是实测结论。改成 `py/*.py` 才真正排除，包体积从 121.9 kB 降到 107.1 kB。
 
-当前包的 13 个文件：`LICENSE`、`README.md`、`cordis.patch.yml`、`package.json`、
-`lib/index.js`、`lib/toolkit.js`、`py/*.py`（6 个）、`skills/docx2md/SKILL.md`。
+当前包的 14 个文件：`LICENSE`、`README.md`、`cordis.patch.yml`、`package.json`、
+`lib/index.js`、`lib/toolkit.js`、`py/*.py`（7 个）、`skills/docx2md/SKILL.md`。
 
 ### 从 tarball 安装这条路径
 
@@ -600,7 +619,13 @@ node test/encoding.mjs 真实文档.docx    # 再验一份中文文档
 - **同一 outDir 会被清理**。换文档复用目录时，旧的 `paras.json`/`media/`/`png/`
   以及**人工确认过的 `headings.json`** 都会被删除——段落号对另一份文档没有意义，
   留着会让新文档的标题挂到错误的段落上。
-- **无预览图的公式无法自动转换**。`inspect` 会报出数量，需要看原 Word 手工补。
+- **无预览图的公式无法自动转换**（仅 OLE 族；OMML 从 XML 转出，不需要预览图）。
+  `inspect` 会报出数量，需要看原 Word 手工补。
+- **OMML 转换覆盖常用结构，未知结构降级拼接**。分式、上下标、根式、定界符、
+  大运算符、函数、重音、横线、矩阵、方程组、underset/overset、纯文本样式、
+  希腊字母与常用符号（22 类逐一测试）。遇到不认识的节点时拼接其子节点内容——
+  宁可少一层装饰，绝不丢内容、绝不抛异常。降级发生时该公式仍会出现在产物里，
+  但可能缺外层结构；对关键公式建议抽查。
 - **预览图必须按 ShapeID 配对，不能按顺序**。公式的预览图是带 `o:ole="t"` 的
   `v:shape`，其 `id` 等于 `OLEObject` 的 `ShapeID`。早期实现按「同段落第 k 个
   公式配第 k 张图」，在公式前面夹着插图的段落里会整体错位，把插图位图当成公式
@@ -635,16 +660,17 @@ dsh-docx2md/
 │   └── toolkit.js     defineTool 的零依赖实现
 ├── py/
 │   ├── docxfile.py    .docx 打开与结构校验（坏输入转可读错误）
-│   ├── docx_scan.py   只读扫描
-│   ├── extract.py     段落 + 公式 + 预览图
+│   ├── docx_scan.py   只读扫描（OLE 与 OMML 两族分开计数）
+│   ├── extract.py     段落 + 公式 + 预览图（OMML 在此转出 LaTeX）
+│   ├── omml.py        OMML → LaTeX 确定性转换器
 │   ├── render.py      跨平台 WMF/EMF → PNG
-│   ├── build.py       段落 + LaTeX 表 → Markdown
+│   ├── build.py       段落 + LaTeX 表 → Markdown（OMML 自动预填）
 │   └── validate.py    六条铁律 + T9/T10 校验
 ├── skills/docx2md/
 │   └── SKILL.md       技能说明（给 Agent 读）
 ├── docs/
 │   └── methodology.md 完整方法论（转换实验总结）
-├── test/              24 组测试（不进发布包）
+├── test/              26 组测试（不进发布包）
 ├── cordis.patch.yml   插件注册
 └── CHANGELOG.md
 ```

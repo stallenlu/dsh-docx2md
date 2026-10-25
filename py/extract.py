@@ -6,13 +6,19 @@
     python extract.py <input.docx> <outdir>
 
 产出（全部落在 <outdir>）:
-    paras.json      段落列表，公式位置标为 ⟦EQ:oleObjectN.bin⟧
-    eq_index.json   公式索引：stream / img / bytes / variant / pairing
+    paras.json      段落列表，公式位置标为 ⟦EQ:oleObjectN.bin⟧（OLE）
+                    或 ⟦EQ:ommlK⟧（Word 原生 OMML）
+    eq_index.json   公式索引：stream / img / bytes / variant / pairing；
+                    OMML 条目带 kind="omml" 与 latex（已确定性转出）
     media/          从 docx 抽出的公式预览图（EMF/WMF 原格式）
     summary.json    统计摘要（供工具层直接返回给模型）
 
 设计要点:
-    * 公式在 document.xml 中以 <o:OLEObject> 出现，按出现顺序替换为占位符
+    * 两族公式都要占位。旧版只认 <o:OLEObject>，OMML 文档的公式会连同
+      结构一起静默消失（正文照常输出，不报错）——那是最坏的一类失败。
+    * OMML（m:oMath）是结构化 XML，LaTeX 由 py/omml.py 在这里直接转出，
+      写进 eq_index.json 的 latex 字段；build 自动预填，无需读图。
+    * OLE 公式按出现顺序替换为占位符
     * 预览图按 OLEObject 的 ShapeID 精确配对到带 o:ole="t" 的 <v:shape>，
       再从该 shape 的 <v:imagedata> 取 rId。不依赖顺序，不受同段落插图干扰。
       ShapeID 缺失时才退回「同段落第 k 个公式配第 k 张图」，并把结果标为
@@ -33,11 +39,13 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from docxfile import BadDocument, fail, force_utf8_stdio, open_docx
+import omml
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 V = "{urn:schemas-microsoft-com:vml}"
 O = "{urn:schemas-microsoft-com:office:office}"
+M = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
 EQ_OPEN = "\u27e6EQ:"      # ⟦EQ:
 EQ_CLOSE = "\u27e7"        # ⟧
@@ -117,7 +125,13 @@ def main():
                     os.remove(fp)
 
     # ---- 1. 段落文本 + 公式占位 ----
+    # 两族公式都要占位：
+    #   OLE（MTEF 二进制）  → ⟦EQ:oleObjectN.bin⟧，LaTeX 靠读图转写
+    #   OMML（Word 原生）   → ⟦EQ:ommlK⟧，LaTeX 在这里就确定性转好
+    # 漏掉任何一族，正文都会「安静地丢公式」——段落文字照常输出，公式无影
+    # 无踪，校验器也查不出来（占位符本来就没生成）。
     paras = []
+    omml_latex = []             # 与 ⟦EQ:ommlK⟧ 的 K 同序：转出的 LaTeX
     for p in body.iter(W + "p"):
         buf = []
         for node in p.iter():
@@ -131,6 +145,12 @@ def main():
                 rid = node.get(R + "id")
                 tgt = (rel_map.get(rid) or "?").split("/")[-1]
                 buf.append("%s%s%s" % (EQ_OPEN, tgt, EQ_CLOSE))
+            elif node.tag == M + "oMath":
+                # m:oMathPara（独立成段的公式）内部就是 m:oMath，
+                # iter 会先进 oMathPara 再进 oMath，这里只认 oMath。
+                tex = omml.to_latex(node)
+                omml_latex.append(tex)
+                buf.append("%somml%d%s" % (EQ_OPEN, len(omml_latex), EQ_CLOSE))
         paras.append("".join(buf))
 
     with open(os.path.join(outdir, "paras.json"), "w", encoding="utf-8") as f:
@@ -220,6 +240,20 @@ def main():
             "pairing": pairing.get(base, "none"),
         })
 
+    # OMML 公式：LaTeX 已经确定性转出，直接带在索引里（kind=omml）。
+    # build.py 会把它预填进公式表；Agent 的 latex.json 若给了同名键则以
+    # Agent 为准——留了人工/模型纠正的余地。
+    for k, tex in enumerate(omml_latex, 1):
+        rows.append({
+            "stream": "omml%d" % k,
+            "kind": "omml",
+            "img": None,
+            "bytes": 0,
+            "variant": "OMML",
+            "pairing": "xml",          # 结构直接来自 XML，不涉及图片配对
+            "latex": tex,
+        })
+
     with open(os.path.join(outdir, "eq_index.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=1)
 
@@ -228,18 +262,25 @@ def main():
     counts = {}
     for r in rows:
         counts[r["variant"]] = counts.get(r["variant"], 0) + 1
-    no_media = [r["stream"] for r in rows if not r.get("img")]
+    ole_rows = [r for r in rows if r.get("kind") != "omml"]
+    omml_rows = [r for r in rows if r.get("kind") == "omml"]
+    # 「缺图」只对 OLE 公式有意义：OMML 的 LaTeX 直接从 XML 转出，不需要图。
+    no_media = [r["stream"] for r in ole_rows if not r.get("img")]
     # 靠下标回退配上的公式：图可能是插图的位图，必须让人知道。
-    by_ordinal = [r["stream"] for r in rows if r.get("pairing") == "ordinal"]
+    by_ordinal = [r["stream"] for r in ole_rows if r.get("pairing") == "ordinal"]
 
     summary = {
         "paragraphs": len(paras),
         "paragraphs_nonempty": len(paras) - n_empty,
-        "formulas": len(rows),
+        # 口径与 inspect 一致：formulas 只数 OLE；OMML 单独报。
+        # 两个工具对「formulas」给两个数，混排文档里 expectFormulas 就会传错。
+        "formulas": len(ole_rows),
+        "formulas_omml": len(omml_rows),
+        "formulas_total": len(rows),
         "variants": counts,
         "media_extracted": len(extracted),
         "formulas_without_media": len(no_media),
-        "formulas_paired_by_shape_id": sum(1 for r in rows if r.get("pairing") == "shape-id"),
+        "formulas_paired_by_shape_id": sum(1 for r in ole_rows if r.get("pairing") == "shape-id"),
         "formulas_paired_by_ordinal": len(by_ordinal),
         "next": (
             "全部公式都有按 ShapeID 确认的预览图，可逐张读图转写 LaTeX。"
@@ -252,6 +293,11 @@ def main():
              % (len(by_ordinal), ", ".join(by_ordinal[:5])))
         ),
     }
+    if omml_rows:
+        summary["next_omml"] = (
+            "另有 %d 个 Word 原生公式（OMML），LaTeX 已直接写入 eq_index.json "
+            "的 latex 字段，build 会自动预填，无需读图；不满意时可在 latex.json "
+            "里用同名键覆盖。" % len(omml_rows))
     if by_ordinal:
         summary["pairing_warning"] = (
             "这些公式的文档里找不到 o:ole=\"t\" 的 v:shape（或 ShapeID 不匹配），"

@@ -1,20 +1,29 @@
 ---
 name: docx2md
-description: 把含 OLE 公式的 Word 文档转成带 LaTeX 的 Markdown：公式渲染成 PNG 后逐张读图转写，再合成为符合六条铁律的 Markdown。当用户要求把 .doc/.docx 转 Markdown、要求保留公式、或提到「公式转换」「Word 转 md」「转换后公式对不对」时使用。
+description: 把含公式的 Word 文档转成带 LaTeX 的 Markdown：OLE 公式渲染成 PNG 后逐张读图转写，Word 原生公式（OMML）自动转出 LaTeX，再合成为符合铁律的 Markdown。当用户要求把 .doc/.docx 转 Markdown、要求保留公式、或提到「公式转换」「Word 转 md」「转换后公式对不对」时使用。
 ---
 
 # DOCX → Markdown（含公式）
 
 把一份满是公式的 Word 文档转成 Markdown，难点**不在**段落和标题——那些是体力活。
-真正的难点是公式：Word 的 OLE 公式是一套私有二进制格式，解出来必然失真。
+真正的难点是公式，而且 docx 里有**两族格式完全不同的公式**，走两条不同的路：
 
-本技能给出经过真实文档验证的流程。核心只有一句话：
+| 公式族 | 来源 | 存储 | 本插件的处理 |
+|---|---|---|---|
+| **OLE 公式** | Equation Editor / MathType（WPS 默认仍是它） | 私有二进制 MTEF，包在 `oleObjectN.bin` 里 | 渲染成 PNG → **视觉转写 LaTeX**（唯一不可自动化的一步） |
+| **OMML**（Word 原生） | Word 2007+ 默认插入；2016 后手敲 LaTeX 语法存下来也是它 | 结构化 XML（`m:oMath`），分式上下标全在树里 | **extract 阶段确定性转成 LaTeX**，不读图、不需要视觉 |
 
-> **以渲染出的位图为准，不以解析出的字符为准。**
+> **以渲染出的位图为准，不以解析出的字符为准。** —— 这条军规针对 **OLE** 一族。
+> OMML 不是"解析出的字符"：它是完整的结构树，转换是确定性的，可靠性比看图更高。
+
+**先分清文档里是哪一族**：`docx2md_inspect` 的 `formulas`（OLE 数）与
+`formulas_omml`（OMML 数）。纯 OMML 文档可以不走第 3 步——extract 已经把
+LaTeX 转进 `eq_index.json` 的 `latex` 字段，build 自动预填，空 latex 表
+也能产出完整文档。混排文档里，只有 OLE 那部分需要读图。
 
 ---
 
-## 一、先认清三种手段的可靠性
+## 一、OLE 公式：认清三种手段的可靠性
 
 | 手段 | 能得到什么 | 可靠性 | 本插件是否提供 |
 |---|---|---|---|
@@ -48,10 +57,11 @@ description: 把含 OLE 公式的 Word 文档转成带 LaTeX 的 Markdown：公�
 ## 二、标准流程
 
 ```
-docx2md_inspect   →  看清有什么、能不能转
+docx2md_inspect   →  看清有什么、能不能转（OLE 多少、OMML 多少）
 docx2md_extract   →  正文 + 公式索引 + 预览图（渲染成 PNG）
-【人工/视觉】      →  逐张读 PNG，转写成 LaTeX   ← 唯一不可自动化的一步
-docx2md_build     →  合成为 Markdown 并校验
+                    OMML 的 LaTeX 此刻已经转好，在 eq_index.json 里
+【人工/视觉】      →  只读 OLE 那部分：逐张读 PNG，转写成 LaTeX
+docx2md_build     →  合成为 Markdown 并校验（OMML 自动预填）
 ```
 
 ### 第 0 步：转换前先问清楚
@@ -66,10 +76,13 @@ docx2md_build     →  合成为 Markdown 并校验
 docx2md_inspect(path="文档.docx")
 ```
 
-看三件事：
-- `formulas` —— 一共有多少公式，决定读图的工作量
+看四件事：
+- `formulas` / `formulas_omml` / `formulas_total` —— OLE 数、Word 原生数、总数。
+  **读图工作量只由 `formulas`（OLE）决定**；OMML 会被 extract 自动转好
 - `variants` —— A 可解字符 / B 不可解；B 多说明必须走渲染
 - `render_engines.can_render` —— 本机能不能渲染。false 就先解决这个
+- `omml_note` / `no_formulas_note` —— 有 OMML 时的说明；两族都是 0 时的提示
+  （肉眼有公式但这里全 0，多半是图片式公式，本工具不覆盖）
 
 ### 第 2 步：extract
 
@@ -78,8 +91,10 @@ docx2md_extract(path="文档.docx", outDir="work/")
 ```
 
 产出：
-- `paras.json` —— 正文段落，公式位置是 `⟦EQ:oleObject12.bin⟧` 占位
-- `eq_index.json` —— 每个公式的 stream 名、预览图、字节数、变体、`pairing`
+- `paras.json` —— 正文段落，公式位置是 `⟦EQ:oleObject12.bin⟧`（OLE）或
+  `⟦EQ:omml3⟧`（Word 原生）占位
+- `eq_index.json` —— 每个公式的 stream 名、预览图、字节数、变体、`pairing`；
+  **OMML 条目额外带 `latex` 字段——转换已完成，build 会自动预填**
 - `media/` —— 原始矢量图（EMF/WMF）
 - `png/` —— 可读位图（**读这个目录**）
 
@@ -90,7 +105,8 @@ docx2md_extract(path="文档.docx", outDir="work/")
 | `formulas_paired_by_shape_id` | 按 `o:ole="t"` 的 shape 精确配到的公式数 | 这是可信的，直接读 |
 | `formulas_paired_by_ordinal` | 找不到 ShapeID、退回「同段落第 k 个公式配第 k 张图」的数量 | **不可信**，见下 |
 
-`pairing` 字段写在 `eq_index.json` 每一条里（`shape-id` / `ordinal` / `none`）。
+`pairing` 字段写在 `eq_index.json` 每一条里（`shape-id` / `ordinal` / `none` /
+`xml`——OMML 是 `xml`，结构直接来自 XML，不涉及图片配对）。
 出现 `ordinal` 时，说明文档没写 `ShapeID`，那张图可能是**同段落里插图的位图**
 而不是公式——插件无法区分，只会如实告诉你它不确定。这种公式要么放大核对图里
 到底是不是公式，要么回原 Word 看。`none` 则是真的没有预览图。
@@ -99,7 +115,12 @@ docx2md_extract(path="文档.docx", outDir="work/")
 > 实测一份 145 公式的文档错了 10 个，而且**没有任何提示**——模型会把程序截图
 > 读成"公式"，产出一个看起来完整、实则全错的结果。
 
-### 第 3 步：读图转写 LaTeX（核心）
+### 第 3 步：读图转写 LaTeX（核心，只针对 OLE 公式）
+
+**OMML 公式跳过这一步**——extract 已从 XML 结构确定性转出 LaTeX，存在
+`eq_index.json` 的 `latex` 字段里，build 会自动预填。只有 `kind` 不是 `omml`
+的条目（OLE 公式）需要你读图。若对某个 OMML 的自动转换不满意，在 latex.json
+里用同名键（如 `"omml3": "…"`）覆盖即可，Agent 的值优先。
 
 **逐张读 `png/` 里的图**，把每条公式抄成 LaTeX，写成一张映射表：
 
@@ -115,7 +136,7 @@ docx2md_extract(path="文档.docx", outDir="work/")
 几条实践经验：
 
 1. **一次读一批，别一次读一张。** 用文件列表批量读，效率高得多。
-2. **不要凭印象补。** 看不清就放大，或者换 ② 路径交叉验证。宁可标 TODO 也不要猜。
+2. **不要凭印象补。** 看不清就放大。宁可标 TODO 也不要猜。
 3. **注意张量约定。** 并矢的指标顺序（`α = Σ ρ_b b` 的线方向在前还是后）是
    作者的约定，不是错误。照抄，不要"纠正"。
 4. **矩阵/多行公式最容易出错。** 数清楚有几行、每行的层级。这类公式通常正是

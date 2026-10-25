@@ -265,6 +265,30 @@ try:
         fails.append("inspect: 文本框里的公式没被计入，formulas_total=%s"
                      % scan.get("formulas_total"))
 
+    # 6b. inspect 报的「段落文字」必须与 extract 的 paras.json 一致。
+    #     实测踩过：inspect 的 para_texts 直接遍历 w:t，把**文本框里**的
+    #     标签也捞进来，于是 inspect 说「这一段的文字是『框内标签』」，
+    #     而 extract 的同一段只有公式占位符——同一个索引，两个工具各说各话，
+    #     排查时会被当成「文档本来就这样」。
+    #
+    #     比的是**文字**：extract 的段落里还带着 ⟦EQ:…⟧ 占位符，那是公式
+    #     的位置标记，inspect 的 paragraph_text 里当然没有——先剥掉再比。
+    def strip_ph(s):
+        return re.sub(r"⟦EQ:[^⟧]*⟧", "", s or "").strip()
+
+    ctx = scan.get("missing_preview_context") or []
+    for c in ctx:
+        idx = c.get("paragraph")
+        if idx is None or idx >= len(tb_paras):
+            continue
+        if (c.get("paragraph_text") or "") != strip_ph(tb_paras[idx]):
+            fails.append("inspect 上下文与 extract 不一致: 段 %s inspect=%r "
+                         "extract=%r" % (idx, c.get("paragraph_text"),
+                                         strip_ph(tb_paras[idx])))
+        if "框内标签" in (c.get("paragraph_text") or ""):
+            fails.append("inspect: 上下文里混进了文本框标签 %r"
+                         % c.get("paragraph_text"))
+
     # 7. 过期 headings.json 必须被拒：它按旧段落序号索引，序号一变就指错。
     #    指错的后果特别隐蔽——若被指的段落恰好是公式段，公式会被当成标题
     #    直接输出，公式凭空消失，直到 T8 才发现数对不上。

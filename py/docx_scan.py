@@ -225,8 +225,29 @@ def main():
     # extract 的 paras.json，两者必须指同一段。
     missing_context = []
     if without:
-        para_texts = ["".join(t.text or "" for t in p_.iter(W + "t")).strip()
-                      for p_ in paras]
+        # 段落文字必须与 extract 的 paras.json **完全一致**。这里的
+        # para_texts 直接遍历 w:t，会把**文本框里**的标签也捞进来（流程图
+        # 的「VDDD3D程序结构图」「结束」…），于是 inspect 说「段落 257 的
+        # 文字是 VDDD3D程序结构图结束…」，而 extract 的 paras.json 里那一段
+        # 只有公式占位符——同一个索引，两个工具各说各话。
+        #
+        # 修法与 extract 同一把尺子：只取**属于本段落**的 w:t（文本框里的
+        # 段落另有其主），文本框里的文字不算本段的文字。
+        def own_text(p_):
+            out = []
+            for t in p_.iter(W + "t"):
+                anc = parents.get(t)
+                nested = False
+                while anc is not None:
+                    if anc.tag == W + "p":
+                        nested = anc is not p_
+                        break
+                    anc = parents.get(anc)
+                if not nested:
+                    out.append(t.text or "")
+            return "".join(out).strip()
+
+        para_texts = [own_text(p_) for p_ in paras]
         para_objs = [[(rel_map.get(o.get(R + "id")) or "?").split("/")[-1]
                       for o in p_.iter(O + "OLEObject")] for p_ in paras]
 

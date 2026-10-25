@@ -42,5 +42,13 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stallenlu/dsh-docx2md.git"
+  },
+  "bugs": {
+    "url": "https://github.com/stallenlu/dsh-docx2md/issues"
+  },
+  "homepage": "https://github.com/stallenlu/dsh-docx2md#readme"
 }

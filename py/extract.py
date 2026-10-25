@@ -360,6 +360,7 @@ def main():
                 target = rel_map.get(rid) or ""
                 inventory.append({
                     "file": target.split("/")[-1],
+                    "target": target,
                     "paragraph": pi,
                     "shape": imgf.classify_picture(w_emu, h_emu),
                     "inline_with_text": has_text,
@@ -429,6 +430,22 @@ def main():
         zpath = t if t.startswith("word/") else "word/" + t
         if zpath in names and zpath not in extracted:
             with open(os.path.join(media_dir, os.path.basename(t)), "wb") as f:
+                f.write(z.read(zpath))
+            extracted.add(zpath)
+
+    # 示意图（inventory 里 shape=illustration 的那些）也要抽出来。
+    #
+    # 清单里写着「image135.emf 在段落 271」，但 media/ 里根本没有这个文件——
+    # 清单指着一个**不存在**的东西，人去核对时无从下手。清单与原件必须
+    # 同时到位，否则「留痕供人核对」就是一句空话。
+    for e in inventory:
+        target = e.get("target") or ""
+        fname = e.get("file") or ""
+        if not fname or not target:
+            continue
+        zpath = target if target.startswith("word/") else "word/" + target
+        if zpath in names and zpath not in extracted:
+            with open(os.path.join(media_dir, fname), "wb") as f:
                 f.write(z.read(zpath))
             extracted.add(zpath)
 

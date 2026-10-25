@@ -135,6 +135,12 @@ try:
     shapes = {i["file"]: i["shape"] for i in inv}
     if shapes.get("eq_formula.png") != "formula" or shapes.get("figure.png") != "illustration":
         fails.append("extract: 清单形状判定错: %s" % shapes)
+    # 清单里列出的每个文件，原件必须在 media/ 里。清单写着「figure.png 在
+    # 段落 2」而 media/ 里没有这个文件，人去核对时无从下手——「留痕供人
+    # 核对」就是一句空话。示意图不进正文是另一回事，它的原件要到位。
+    for e in inv:
+        if not os.path.exists(os.path.join(out, "media", e["file"])):
+            fails.append("extract: 清单里的 %s 原件没抽进 media/" % e["file"])
 
     # 3a. build 未转写：可见的图片引用（不是纯注释）
     empty = os.path.join(work, "empty.json")

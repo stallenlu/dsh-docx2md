@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.6.2
+
+### 图版排列错乱（"图排列不对"）
+
+用户报告 ii)、v) 两节「后的图排列不对」。
+
+根因不是图片丢了，而是**排列丢了**：这两节的图不是一张张独立插图，而是
+一个图版——3 列 × 2 行，每个格子下面压着一个公式标签。docx 里有**两份**
+表示：
+
+- `mc:Choice` → DrawingML `wpc`（wordprocessingCanvas），每个 `pic` 带
+  `a:off` / `a:ext` **绝对坐标**；
+- `mc:Fallback` → VML `v:group`，只有 `v:imagedata` 的**顺序**。
+
+旧实现只按顺序逐张抽取（读的是 Fallback），于是「3 列 2 行」被压成
+「6 行竖排」，公式标签与格子脱钩——图都在，但读者看不出它们是网格。
+
+#### 新增 DrawingML 画布支持（`py/canvas.py`）
+
+- `is_drawing_canvas(el)`：`wpc` 且含 **2 张以上** `pic` 才算画布。
+  只包一张图的 `wpc` 是普通插图容器，逐张抽取更灵活（可单独替换/删除）。
+- `drawing_canvas_svg(wpc, rel_map, workdir, extent)`：按每个 `pic` 的
+  `a:off`/`a:ext` 精确定位，画布尺寸取外层 `wp:extent`（EMU → pt 除以 12700）。
+- `_media_data_uri(fname, workdir)`：从 `media/`（EMF/WMF 优先用 `png/` 里
+  渲染好的 PNG）读成 data URI 内嵌进 SVG。
+- `render_drawing_canvas()` 复用同一套 `rasterize()`。
+
+#### 扩宽 VML 画布判据
+
+`is_canvas` 现在也认**多图按坐标排布的图版**（`media >= 2`）。之前只认
+「有连线 / 有填充几何形状」，于是 ii) 那个 VML 图版（12 张图，无框无箭头）
+被当成普通插图容器逐张抽出来，网格同样被压平。
+
+#### 接入 `extract.py`
+
+- `_walk` 新增 `wpc` 分支：整块渲染后短路，`mc:Fallback` 那份不会被重复走到
+  （`rich.py` 只挑 `Choice`），所以同一张图版只出 1 个占位。
+- 画布预抽取媒体时同时扫 `a:blip`（wpc 的图不在 `v:imagedata` 上）。
+
+#### 实测（真实文档）
+
+画布从 2 块增至 **6 块**（2 流程图 + 4 图版），`canvases_rendered 6/6`，
+`figures` 24 → 4（网格不再被拆成散图），`formulas_canvas` 14 → 20。
+`validate --expect-formulas 145` → `错误 0 警告 0 PASS`。
+
+`test/canvas_e2e.py` 增补 E 段 8 项断言（wpc 识别 / 单图不算画布 /
+Choice 与 Fallback 不重复出图）。
+
 ## 0.6.1
 
 ### 修 0.6.0 里的四个画布 bug（都在真实文档上才暴露）

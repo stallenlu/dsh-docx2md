@@ -145,6 +145,89 @@ def build_docx(path):
         z.writestr("word/embeddings/oleObject1.bin", b"\x00" * 64)
 
 
+# ------------------------------------------------------- DrawingML 布局画布
+# 同一张图版在 docx 里有**两份**表示：mc:Choice 是 DrawingML `wpc`（每个
+# pic 带 a:off / a:ext 绝对坐标），mc:Fallback 是 VML `v:group`（只有顺序）。
+# 只有 Choice 那份有位置信息。用户报的"图排列不对"就是只读了 Fallback。
+NS_WPC = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+          'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
+          'relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/'
+          '2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/'
+          '2006/picture" xmlns:wp="http://schemas.openxmlformats.org/drawingml/'
+          '2006/wordprocessingDrawing" '
+          'xmlns:wpc="http://schemas.microsoft.com/office/word/2010/'
+          'wordprocessingCanvas" '
+          'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+          'xmlns:v="urn:schemas-microsoft-com:vml" '
+          'xmlns:o="urn:schemas-microsoft-com:office:office" '
+          'xmlns:w10="urn:schemas-microsoft-com:office:word"')
+
+
+def _wpc_pic(rid, ox, oy, cx, cy, n):
+    return ('<pic:pic><pic:nvPicPr><pic:cNvPr id="%d" name="图片 %d"/>'
+            '<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="%s"/>'
+            '<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr>'
+            '<a:xfrm><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+            '</pic:pic>' % (n, n, rid, ox, oy, cx, cy))
+
+
+WPC_DOC_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<w:document %s><w:body>' % NS_WPC +
+    '<w:p><w:r><w:t>图版说明。</w:t></w:r></w:p>'
+    '<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wpc">'
+    '<w:drawing><wp:inline><wp:extent cx="5831840" cy="2489835"/>'
+    '<wp:docPr id="10" name="画布 105"/><a:graphic><a:graphicData '
+    'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas">'
+    '<wpc:wpc><wpc:bg><a:noFill/></wpc:bg><wpc:whole><a:ln><a:noFill/></a:ln>'
+    '</wpc:whole>'
+    + _wpc_pic("rIdW1", 0, 0, 2801399, 2489835, 1)
+    + _wpc_pic("rIdW2", 3030441, 0, 2801399, 2489835, 2)
+    + '</wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing>'
+    '</mc:Choice><mc:Fallback><w:pict><v:group id="画布 105" '
+    'coordsize="5831840,2489835" style="width:459.2pt;height:196.05pt">'
+    '<v:shape style="position:absolute;width:220.6pt;height:196.05pt">'
+    '<v:imagedata r:id="rIdW1" o:title=""/></v:shape>'
+    '<v:shape style="position:absolute;left:238.6pt;width:220.6pt;'
+    'height:196.05pt"><v:imagedata r:id="rIdW2" o:title=""/></v:shape>'
+    '</v:group></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>'
+    '<w:p><w:r><w:t>结束。</w:t></w:r></w:p>'
+    '<w:sectPr/></w:body></w:document>'
+)
+
+WPC_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+    'relationships">'
+    '<Relationship Id="rIdW1" Type="http://schemas.openxmlformats.org/'
+    'officeDocument/2006/relationships/image" Target="media/w1.png"/>'
+    '<Relationship Id="rIdW2" Type="http://schemas.openxmlformats.org/'
+    'officeDocument/2006/relationships/image" Target="media/w2.png"/>'
+    '</Relationships>'
+)
+
+# 1×1 红点 PNG（足够让渲染器有东西可画，且能核对像素）
+PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080200000090"
+    "7753de0000000c4944415408d763f8cfc0000003010100c9fe92ef000000"
+    "0049454e44ae426082")
+
+
+def build_wpc_docx(path):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml",
+                   CONTENT_TYPES.replace(
+                       '<Default Extension="bin"',
+                       '<Default Extension="png" ContentType="image/png"/>'
+                       '<Default Extension="bin"'))
+        z.writestr("_rels/.rels", ROOT_RELS)
+        z.writestr("word/document.xml", WPC_DOC_XML)
+        z.writestr("word/_rels/document.xml.rels", WPC_RELS)
+        z.writestr("word/media/w1.png", PNG_1PX)
+        z.writestr("word/media/w2.png", PNG_1PX)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="canvas_e2e_")
     doc = os.path.join(tmp, "canvas.docx")
@@ -237,6 +320,52 @@ def main():
                       % rep.get("canvases"))
                 check(rep.get("formulas_canvas") == 1,
                       "build_report 里 formulas_canvas=1")
+        # ---- 5. DrawingML 布局画布（wpc）----
+        # 用户报的"图排列不对"就出在这里：同一张图版在 docx 里有两份表示，
+        # Choice 是带坐标的 wpc，Fallback 是无坐标的 v:group。只读 Fallback
+        # 会把并排的两张图压成上下两行。
+        print("== E. DrawingML 布局画布（wpc）==")
+        wpc_doc = os.path.join(tmp, "wpc.docx")
+        wpc_out = os.path.join(tmp, "out_wpc")
+        build_wpc_docx(wpc_doc)
+        with zipfile.ZipFile(wpc_doc) as z:
+            wroot = ET.fromstring(z.read("word/document.xml"))
+        wbody = wroot.find(W + "body")
+        wpcs = list(wbody.iter(canvas.WPC + "wpc"))
+        check(len(wpcs) == 1, "找到 1 个 wpc 画布（实际 %d）" % len(wpcs))
+        if wpcs:
+            check(canvas.is_drawing_canvas(wpcs[0]), "wpc 被识别为画布")
+            check(len(list(wpcs[0].iter(canvas.PIC + "pic"))) == 2,
+                  "wpc 里有 2 张图")
+        # 单图的 wpc 不算画布（逐张抽取更灵活）
+        single = ('<wpc:wpc %s>' % NS_WPC
+                  + _wpc_pic("rIdX", 0, 0, 100, 100, 1) + '</wpc:wpc>')
+        se = ET.fromstring(single)
+        check(not canvas.is_drawing_canvas(se),
+              "只包 1 张图的 wpc 不算画布")
+
+        env2 = dict(os.environ)
+        env2["PYTHONPATH"] = PY
+        r3 = subprocess.run([sys.executable, os.path.join(PY, "extract.py"),
+                             wpc_doc, wpc_out], capture_output=True, text=True,
+                            env=env2, timeout=300)
+        if r3.returncode != 0:
+            check(False, "wpc extract 失败: %s"
+                  % (r3.stderr or r3.stdout)[-400:])
+        else:
+            wsum = json.load(open(os.path.join(wpc_out, "summary.json"),
+                                  encoding="utf-8"))
+            check(wsum.get("canvases") == 1,
+                  "wpc 落成 1 块画布（实际 %s）" % wsum.get("canvases"))
+            check(wsum.get("canvases_rendered") == 1, "wpc 渲染成功")
+            wparas = json.load(open(os.path.join(wpc_out, "paras.json"),
+                                    encoding="utf-8"))
+            wj = "\n".join(wparas)
+            check(re.search(r"⟦EQ:fig:canvas\d+\.png⟧", wj) is not None,
+                  "wpc 在正文落成画布图片占位")
+            # 关键：Choice 与 Fallback 是同一份内容，不能出两张图
+            check(wj.count("fig:canvas") == 1,
+                  "同一张图版只出 1 个占位（Choice/Fallback 不重复）")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

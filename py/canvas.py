@@ -32,6 +32,10 @@ O = "{urn:schemas-microsoft-com:office:office}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 W10 = "{urn:schemas-microsoft-com:office:word}"
+A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+PIC = "{http://schemas.openxmlformats.org/drawingml/2006/picture}"
+WPC = "{http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas}"
+WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 
 # 这些 spt 是「画布边框」或纯图片，不算画布的结构元素。
 FRAME_SPT = {"1", "75"}
@@ -160,16 +164,27 @@ def _content_shapes(el):
 def is_canvas(el):
     """一个元素是不是需要**整块渲染**的画布。
 
-    判据见 `_content_shapes`：有连线、有填充几何形状，或「多图 + 标签」
-    的图版。单纯装内容的 `v:group` 壳（例如只放公式文本框）不算。
+    三类都算：
+
+    a) 有连线 / 填充几何形状 —— 流程图。
+    b) **多张图按坐标排布** —— 图版（3×2 网格、左右并排、图下带公式标签）。
+       这一类最初被我判成「纯图片容器，逐张抽取才对」，实测是错的：
+       逐张抽取会把「三列两行」压成六行竖排，每个格子下面的公式标签也
+       与格子脱钩（真实文档 ii)、v) 两节就是这么错的）。图与图的**相对
+       位置**本身就是格式，文字层表达不了，只能整块画成一张图。
+    c) 多图 + 文字标签 —— 同上，且带图注。
+
+    只装内容、没有版面的一层 `v:group` 壳（例如只放公式文本框）不算，
+    否则框里的公式会被画进图里、正文就没有占位符了。
     """
     if el.tag != V + "group":
         return False
     structural, media, has_text = _content_shapes(el)
     if structural > 0:
         return True
-    # (c) 并排图版：多张图 + 文字标签，整块渲染才能保住图注与排布
-    return media >= 2 and has_text
+    if media >= 2:
+        return True
+    return media >= 1 and has_text
 
 
 def find_canvases(root):
@@ -556,6 +571,115 @@ def rasterize(svg, out_png, width_pt, height_pt, scratch_dir=None):
         except OSError:
             pass
     return ok, why
+
+
+def is_drawing_canvas(el):
+    """是不是 DrawingML 画布（`wpc`，Word 2010+ 的"绘图画布"）。
+
+    为什么必须单独认：同一张图版在 docx 里有**两份**表示——
+    `mc:Choice`（DrawingML `wpc`，带每个 pic 的 `a:off`/`a:ext` 绝对坐标）
+    与 `mc:Fallback`（VML `v:group`，只有 imagedata 的顺序）。
+    Choice 那份才有**位置信息**；Fallback 只能靠顺序猜。
+
+    真实文档 ii)、v)、vi) 三节的图版就是这种：3 列 × 2 行，每个格子下面
+    压着一个公式标签。按顺序逐张抽取会把网格压成竖排六行、标签与格子
+    脱钩——这就是用户报的"图排列不对"。
+
+    只包一张图的 `wpc` 不算画布：那是"把一张图放进画布容器"的普通插图，
+    逐张抽取更灵活（可单独替换、可单独删），整块渲染只是多绕一圈。
+    """
+    if el.tag != WPC + "wpc":
+        return False
+    return sum(1 for _ in el.iter(PIC + "pic")) >= 2
+
+
+def drawing_canvas_svg(wpc, rel_map, workdir, extent=None):
+    """DrawingML 画布 → SVG。返回 (svg, w_pt, h_pt)。
+
+    `extent` 是外层 `wp:extent`（EMU），画布的实际显示尺寸。取不到时用
+    所有 pic 的包围盒。
+    """
+    pics = []
+    max_x = max_y = 0
+    for pic in wpc.iter(PIC + "pic"):
+        rid = None
+        for b in pic.iter(A + "blip"):
+            rid = b.get(R + "embed")
+            break
+        if not rid:
+            continue
+        off = ext = None
+        for o in pic.iter(A + "off"):
+            off = (int(o.get("x") or 0), int(o.get("y") or 0))
+            break
+        for e in pic.iter(A + "ext"):
+            ext = (int(e.get("cx") or 0), int(e.get("cy") or 0))
+            break
+        if not off or not ext:
+            continue
+        pics.append((rid, off, ext))
+        max_x = max(max_x, off[0] + ext[0])
+        max_y = max(max_y, off[1] + ext[1])
+    if not pics:
+        return None, 0, 0
+
+    # 画布尺寸：外层 extent 优先（那是 Word 里实际显示的框）
+    if extent and extent[0] > 0 and extent[1] > 0:
+        cx, cy = extent
+    else:
+        cx, cy = max_x, max_y
+    w_pt = cx / 12700.0          # EMU → pt（1pt = 12700 EMU）
+    h_pt = cy / 12700.0
+
+    body = ['<rect x="0" y="0" width="%d" height="%d" fill="#FFFFFF"/>'
+            % (cx, cy)]
+    for rid, (ox, oy), (ex, ey) in pics:
+        target = rel_map.get(rid)
+        if not target:
+            continue
+        fname = target.split("/")[-1]
+        uri = _media_data_uri(fname, workdir)
+        if not uri:
+            continue
+        body.append('<image x="%d" y="%d" width="%d" height="%d" '
+                    'preserveAspectRatio="none" href="%s"/>'
+                    % (ox, oy, ex, ey, uri))
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" '
+           'xmlns:xlink="http://www.w3.org/1999/xlink" '
+           'data-docx2md="canvas" '
+           'width="%.2fpt" height="%.2fpt" viewBox="0 0 %d %d">%s</svg>'
+           % (w_pt, h_pt, cx, cy, "".join(body)))
+    return svg, w_pt, h_pt
+
+
+def _media_data_uri(fname, workdir):
+    """media 里的文件名 → data URI（EMF/WMF 用 png/ 里渲染好的 PNG）。"""
+    stem, ext = os.path.splitext(fname)
+    cands = []
+    if ext.lower() in (".emf", ".wmf"):
+        cands.append(os.path.join(workdir, "png", stem + ".png"))
+    cands.append(os.path.join(workdir, "media", fname))
+    for path in cands:
+        if not os.path.isfile(path):
+            continue
+        mime = "image/png"
+        low = path.lower()
+        if low.endswith((".jpg", ".jpeg")):
+            mime = "image/jpeg"
+        elif low.endswith(".gif"):
+            mime = "image/gif"
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        return "data:%s;base64,%s" % (mime, b64)
+    return None
+
+
+def render_drawing_canvas(wpc, rel_map, workdir, out_png, extent=None):
+    """DrawingML 画布 → PNG。返回 (ok, reason)。"""
+    svg, w, h = drawing_canvas_svg(wpc, rel_map, workdir, extent)
+    if not svg:
+        return False, "DrawingML 画布没有可渲染的图片"
+    return rasterize(svg, out_png, w, h, os.path.dirname(out_png))
 
 
 def render_canvas(group, rel_map, workdir, out_png):

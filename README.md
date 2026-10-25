@@ -200,6 +200,18 @@ pnpm remove dsh-docx2md
 |---|---|---|
 | Windows / WSL | Edge 或 Chrome 的 `--headless` | 自动探测 `msedge` / `chrome` / 常见安装路径 |
 
+画布有两种表示，都要整块渲染：
+
+| docx 里的写法 | 是什么 | 为什么不能逐张抽 |
+|---|---|---|
+| VML `v:group` | 流程图（框/菱形/箭头/标签） | 文字层表达不了「这些框怎么连」 |
+| DrawingML `wpc` | 图版（3×2 网格等） | 每张图带 `a:off`/`a:ext` 绝对坐标，逐张抽会把网格压成竖排 |
+| VML `v:group`（纯多图） | 同上，只是老写法 | 同上 |
+
+同一张图版在 `mc:AlternateContent` 里有 `Choice`（`wpc`，带坐标）和
+`Fallback`（`v:group`，只有顺序）两份，**只取 Choice**：那份才有位置信息，
+且两者是同一份内容，都读会重复出图。
+
 没有可用浏览器时，画布**不会静默消失**：`summary.json` 里
 `canvases_rendered` 会小于 `canvases`，并给出 `canvas_warning` 指明哪一块、
 为什么失败。

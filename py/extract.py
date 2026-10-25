@@ -299,6 +299,14 @@ def main():
             _t = rel_map.get(_rid) if _rid else None
             if _t:
                 _canvas_media.add(_t.split("/")[-1])
+    # DrawingML 画布（wpc）里的图也要提前备好——它是另一套表示，
+    # 图片不在 v:imagedata 里，而在 a:blip 上。
+    for _el in body.iter(canvas.WPC + "wpc"):
+        for _b in _el.iter(A + "blip"):
+            _rid = _b.get(R + "embed")
+            _t = rel_map.get(_rid) if _rid else None
+            if _t:
+                _canvas_media.add(_t.split("/")[-1])
     if _canvas_media:
         os.makedirs(media_dir, exist_ok=True)
         for _fn in _canvas_media:
@@ -333,13 +341,22 @@ def main():
             if sid:
                 canvas_shape_ids.add(sid)
 
-    def _canvas_placeholder(g):
-        """把一个画布渲染成 media/ 里的 PNG，返回占位符文本。"""
+    def _canvas_placeholder(g, extent=None):
+        """把一个画布渲染成 media/ 里的 PNG，返回占位符文本。
+
+        两种画布都走这里：
+          * VML `v:group`（流程图、VML 图版）
+          * DrawingML `wpc`（Word 2010+ 的绘图画布，带每张图的绝对坐标）
+        """
         if g in canvas_of:
             return canvas_of[g]
         fname = "canvas%d.png" % (len(canvas_hits) + 1)
         out_png = os.path.join(media_dir, fname)
-        ok, why = canvas.render_canvas(g, rel_map, outdir, out_png)
+        if canvas.is_drawing_canvas(g):
+            ok, why = canvas.render_drawing_canvas(g, rel_map, outdir,
+                                                   out_png, extent)
+        else:
+            ok, why = canvas.render_canvas(g, rel_map, outdir, out_png)
         canvas_of[g] = (fname, ok, why)
         canvas_hits.append({"file": fname, "ok": ok, "reason": why})
         if ok:
@@ -386,6 +403,24 @@ def main():
             """
             if el is not node and canvas.is_canvas(el):
                 ph = _canvas_placeholder(el)
+                if ph:
+                    out.append(ph)
+                return
+            # DrawingML 画布（wpc）：同一份图版在 mc:Fallback 里还有一个
+            # v:group 副本。这里认 wpc 就整块短路，Fallback 那份不会再被
+            # 走到（rich.py 只挑 Choice），不会重复出图。
+            if el is not node and canvas.is_drawing_canvas(el):
+                ext = None
+                cur = parents.get(el)
+                while cur is not None:
+                    if cur.tag == canvas.WP + "extent":
+                        try:
+                            ext = (int(cur.get("cx")), int(cur.get("cy")))
+                        except (TypeError, ValueError):
+                            ext = None
+                        break
+                    cur = parents.get(cur)
+                ph = _canvas_placeholder(el, ext)
                 if ph:
                     out.append(ph)
                 return

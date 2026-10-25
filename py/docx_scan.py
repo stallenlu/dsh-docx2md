@@ -10,7 +10,8 @@
     formulas            OLE 公式数（与 extract 的 formulas 同口径）
     formulas_omml       Word 原生公式（OMML）数——extract 阶段确定性转出
                         LaTeX，不需要读图；不计入 formulas
-    formulas_total      两族之和（expectFormulas 用它）
+    formulas_image      图片公式候选数（形状启发式，见 image_note）
+    formulas_total      三族之和（expectFormulas 用它）
     variants            公式的 MTEF 变体分布（A 可解字符 / B 必须看图）
     formulas_with_preview, formulas_without_preview
     media_formats       预览图的实际格式分布（wmf/emf/png/jpeg）
@@ -35,6 +36,7 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from docxfile import BadDocument, fail, force_utf8_stdio, open_docx
+import imgformula as imgf
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
@@ -135,6 +137,30 @@ def main():
     # 实际是「有一族本工具此前不认识」。
     n_omml = sum(1 for _ in body.iter(M + "oMath"))
 
+    # 图片公式候选：形状启发式（扁条状行内图），见 imgformula.py。
+    # 只报数量与例子，不报结论——图片公式没有结构可解，判断交给人。
+    ole_ids = imgf.ole_shape_ids(body)
+    ole_container = imgf.ole_preview_skip(body)
+    img_cands = []
+    for pi, p in enumerate(paras):
+        for run in p.iter(W + "r"):
+            for child in run:
+                if imgf.local_name(child.tag) not in ("drawing", "pict"):
+                    continue
+                if imgf.is_ole_preview(child, ole_ids, ole_container):
+                    continue
+                rid = imgf.picture_rid(child)
+                if not rid:
+                    continue
+                w, h = imgf.picture_size(child)
+                if imgf.classify_picture(w, h) == "formula":
+                    img_cands.append({
+                        "file": (rel_map.get(rid) or "?").split("/")[-1],
+                        "paragraph": pi,
+                        "ratio": round(w / h, 2) if w and h else None,
+                        "context": imgf.para_text(p)[:60],
+                    })
+
     # 变体统计
     variants = {}
     conv_errors = []
@@ -203,7 +229,8 @@ def main():
         # OMML 单独报，避免把两个族混进一个数字里掩盖差异。
         "formulas": n_eq,
         "formulas_omml": n_omml,
-        "formulas_total": n_eq + n_omml,
+        "formulas_image": len(img_cands),
+        "formulas_total": n_eq + n_omml + len(img_cands),
         "embeddings": len(embeds),
         "variants": variants,
         "formulas_with_preview": with_preview,
@@ -218,10 +245,18 @@ def main():
             "有 %d 个 Word 原生公式（OMML）。它们是结构化 XML，extract 阶段"
             "会确定性转成 LaTeX（eq_index.json 的 latex 字段），无需读图。"
             % n_omml)
-    if n_eq == 0 and n_omml == 0:
+    if img_cands:
+        result["image_formula_candidates"] = img_cands[:20]
+        result["image_note"] = (
+            "有 %d 处按形状判定的图片公式候选（扁条状行内图：宽高比>=2.5 且"
+            "高<=120px）。像素没有结构可解，工具无法转换它们；extract 会把它们"
+            "落成 ⟦EQ:img:…⟧ 占位（绝不静默丢），原件抽到 media/。候选是启发式，"
+            "清单里的 ratio/上下文供你逐个过目——也可能是行内小图标。"
+            % len(img_cands))
+    if n_eq == 0 and n_omml == 0 and not img_cands:
         result["no_formulas_note"] = (
-            "两族公式（OLE / OMML）都没有检测到。若文档肉眼可见有公式，"
-            "可能是图片式公式或第三方编辑器私有格式，本工具不覆盖。")
+            "三族公式（OLE / OMML / 图片候选）都没有检测到。若文档肉眼可见有公式，"
+            "可能是图片式公式但形状不像（如整页扫描），或第三方编辑器私有格式。")
     if without:
         result["missing_preview_count"] = without
         result["missing_preview_context"] = missing_context

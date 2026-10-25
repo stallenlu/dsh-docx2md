@@ -52,6 +52,7 @@ const EXPECTED = new Set([
   'py/docx_scan.py',
   'py/docxfile.py',
   'py/extract.py',
+  'py/imgformula.py',
   'py/omml.py',
   'py/render.py',
   'py/validate.py',

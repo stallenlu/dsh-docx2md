@@ -1,27 +1,28 @@
 # dsh-docx2md
 
 把含公式的 Word 文档转成带 LaTeX 的 Markdown —— 跨平台，保留公式编号与结构。
-**OLE 公式（Equation Editor / MathType）与 Word 原生公式（OMML，新版 Word 的
-默认格式）两族都支持。**
+**OLE 公式（Equation Editor / MathType）、Word 原生公式（OMML，新版 Word 的
+默认格式）、图片形式的公式（截图/扫描）三种载体都处理。**
 
 A DeepSeek Harness plugin that converts Word documents with embedded equations —
-both legacy OLE (MTEF) and native OMML — into Markdown with LaTeX, preserving
-numbering and document structure.
+legacy OLE (MTEF), native OMML, and image-embedded formulas — into Markdown with
+LaTeX, preserving numbering and document structure.
 
 ---
 
-## 两族公式，两条路
+## 三种载体，三条路
 
-| | OLE 公式 | OMML（Word 原生） |
-|---|---|---|
-| 谁在用 | Equation Editor / MathType；WPS 公式的默认载体 | Word 2007+ 插入公式的默认格式；2016 后手敲 LaTeX 存下来也是它 |
-| 存在哪 | 私有二进制（MTEF）包在 `oleObjectN.bin` | 结构化 XML（`m:oMath`） |
-| 怎么转 | 渲染成 PNG → 视觉模型逐张读图转写 | **extract 阶段确定性转成 LaTeX**，不读图 |
-| 质量 | 取决于读图；有校验器与配对告警兜底 | 22 类结构逐一测试（分式/上下标/根式/矩阵/大运算符/重音/…） |
-| 需要人工 | 是（第 3 步） | 否（不满意可覆盖，见下） |
+| | OLE 公式 | OMML（Word 原生） | 图片公式 |
+|---|---|---|---|
+| 谁在用 | Equation Editor / MathType；WPS 公式的默认载体 | Word 2007+ 插入公式的默认格式；2016 后手敲 LaTeX 存下来也是它 | 截图粘贴、扫描页、从 PDF 拷贝 |
+| 存在哪 | 私有二进制（MTEF）包在 `oleObjectN.bin` | 结构化 XML（`m:oMath`） | 一张位图（`w:drawing` / `v:pict`） |
+| 怎么转 | 渲染成 PNG → 视觉模型逐张读图转写 | **extract 阶段确定性转成 LaTeX**，不读图 | **无法自动转换**（像素无结构可解）；落成占位符，读 `media/` 原件转写，键 `"img:文件名"` |
+| 质量 | 取决于读图；有校验器与配对告警兜底 | 22 类结构逐一测试（分式/上下标/根式/矩阵/大运算符/重音/…） | 取决于读图；候选按形状启发式（扁条行内图），清单带证据供人过目 |
+| 需要人工 | 是（第 3 步） | 否（不满意可覆盖，见下） | 是（第 3.5 步） |
+| 不处理会怎样 | 报 T9 未解析 | —— | **不丢**：build 落成可见图片引用（`![图片公式 …]`），T11 查断链 |
 
 纯 OMML 文档全程无需读图：`docx2md_build` 用**空的** latex 表也能产出完整
-Markdown（OMML 自动预填）。混排文档里只有 OLE 那部分需要视觉转写。
+Markdown（OMML 自动预填）。混排文档里只有 OLE 与图片那部分需要视觉转写。
 
 ## 为什么 OLE 需要看图
 
@@ -211,7 +212,7 @@ Agent 会加载 `docx2md` 技能，按 inspect → extract → 读图 → build 
 docx2md_inspect(path)
 ```
 只读扫描。返回段落数、公式数（分 `formulas`＝OLE 与 `formulas_omml`＝Word 原生
-两族）、变体分布（A 可解 / B 必须看图）、预览图格式分布、本机渲染引擎。
+三类：OLE / OMML / 图片公式候选）、变体分布（A 可解 / B 必须看图）、预览图格式分布、本机渲染引擎。
 
 **它只输出事实，不给结论。** 例如缺预览图的公式，`inspect` 会给出
 `missing_preview_context`（所在段落、段落文字、前后段），但不会替你判断
@@ -221,31 +222,35 @@ docx2md_inspect(path)
 docx2md_extract(path, outDir?, render?)
 ```
 产出：
-- `paras.json` —— 正文段落，公式位置为 `⟦EQ:oleObject12.bin⟧`（OLE）或
-  `⟦EQ:omml3⟧`（Word 原生）
+- `paras.json` —— 正文段落，公式位置为 `⟦EQ:oleObject12.bin⟧`（OLE）、
+  `⟦EQ:omml3⟧`（Word 原生）或 `⟦EQ:img:文件名⟧`（图片公式候选）
 - `eq_index.json` —— 每个公式的 stream / 预览图 / 字节数 / 变体 / `pairing`；
   **OMML 条目直接带 `latex` 字段**（从 XML 结构确定性转出，无需读图）
-- `media/` —— 原始 EMF/WMF
+- `media/` —— 原始 EMF/WMF 与图片公式的位图原件
 - `png/` —— 可读位图（**读这个目录**）
+- `image_inventory.json` —— 正文全部行内图片的形状证据（ratio / 尺寸 /
+  上下文段落），图片公式候选的判定依据；示意图也在这里，供人核对
 
 ```
 docx2md_build(workDir, latex, out, suggestHeadings?, expectFormulas?)
 ```
 把 `{"oleObject1.bin": "\\alpha", ...}` 合成 Markdown 并校验。
 `expectFormulas` 会核对公式总数，能抓住漏转。OMML 公式无需出现在 latex 表里
-（自动预填；给了同名键则以你给的为准）。
+（自动预填；给了同名键则以你给的为准）。图片公式不转写也不丢——落成
+`![图片公式 …](media/…)` 可见引用；转写时键用 `"img:文件名"`。
 
 ### 产物落在哪、会不会留垃圾
 
 插件**不创建系统临时目录**（不用 `mkdtemp` / `tempfile` / `TMPDIR`），所有中间产物
 都在你给的 `outDir` 里；不给就落在 docx 同级的 `<名字>_docx2md/`。
 
-一次转换产生 5 个条目（145 公式的论文实测 4.3 MB）：
+一次转换产生 6 个条目（145 公式的论文实测 4.3 MB）：
 
 | 条目 | 内容 | 大小 |
 |---|---|---|
 | `paras.json` | 正文段落，公式位置为 `⟦EQ:oleObjectN.bin⟧` | ~20 KB |
 | `eq_index.json` | 公式索引（stream / 预览图 / MTEF 变体） | ~24 KB |
+| `image_inventory.json` | 行内图片的形状证据与上下文（图片公式候选清单） | ~1 KB |
 | `media/` | 原始矢量预览图（wmf/emf）+ 文档自带位图 | ~1.3 MB |
 | `png/` | 渲染后的可读位图，Agent 靠它转写 LaTeX | ~3.0 MB |
 | `summary.json` | 本次提取的统计 | ~0.3 KB |
@@ -472,8 +477,8 @@ node test/pack.mjs                    # 打包内容
 而且 `.npmignore` 在 `files` 白名单模式下对已纳入的目录**不生效**——这一条与
 直觉相反，是实测结论。改成 `py/*.py` 才真正排除，包体积从 121.9 kB 降到 107.1 kB。
 
-当前包的 14 个文件：`LICENSE`、`README.md`、`cordis.patch.yml`、`package.json`、
-`lib/index.js`、`lib/toolkit.js`、`py/*.py`（7 个）、`skills/docx2md/SKILL.md`。
+当前包的 15 个文件：`LICENSE`、`README.md`、`cordis.patch.yml`、`package.json`、
+`lib/index.js`、`lib/toolkit.js`、`py/*.py`（8 个）、`skills/docx2md/SKILL.md`。
 
 ### 从 tarball 安装这条路径
 
@@ -626,6 +631,13 @@ node test/encoding.mjs 真实文档.docx    # 再验一份中文文档
   希腊字母与常用符号（22 类逐一测试）。遇到不认识的节点时拼接其子节点内容——
   宁可少一层装饰，绝不丢内容、绝不抛异常。降级发生时该公式仍会出现在产物里，
   但可能缺外层结构；对关键公式建议抽查。
+- **图片公式无法自动转换，但绝不静默丢**。截图/扫描进来的公式在 docx 里
+  就是一张位图，像素没有结构可解。工具做的是：按形状启发式（扁条状行内图：
+  宽高比≥2.5 且高≤120px）识别**候选**、生成 `⟦EQ:img:文件名⟧` 占位、把原件
+  抽进 `media/`；Agent 读图转写后以 `"img:文件名"` 为键回填 LaTeX。什么都不做
+  也不丢——build 会落成可见的图片引用（不是藏进注释），校验器 T11 保证引用
+  不断链。候选是启发式不是结论：行内小图标也可能被算进来，
+  `image_inventory.json` 带 ratio/尺寸/上下文供人逐个过目。
 - **预览图必须按 ShapeID 配对，不能按顺序**。公式的预览图是带 `o:ole="t"` 的
   `v:shape`，其 `id` 等于 `OLEObject` 的 `ShapeID`。早期实现按「同段落第 k 个
   公式配第 k 张图」，在公式前面夹着插图的段落里会整体错位，把插图位图当成公式
@@ -643,6 +655,8 @@ node test/encoding.mjs 真实文档.docx    # 再验一份中文文档
   | 现象 | 原因 | 查什么 |
   |---|---|---|
   | 公式显示成 LaTeX 源码 / 整块空白 | `$` 与中文紧贴，渲染器没识别成公式 | `validation.warnings` 里的 **T10** |
+  | 产物里出现 `![图片公式 …]` | 该公式在 Word 里就是张图，未转写（不丢机制在起作用） | `build` 返回的 `image_placeholders` |
+  | 图片公式引用是破图 | 引用目标文件不存在 | `validation.errors` 里的 **T11** |
   | 显示成 `\begin{aligned}` 原文 | 块级环境写进了行内公式 | **T2** |
   | 只有长的、矩阵的坏 | 同上，或该渲染器不支持某些命令 | T2 + 该渲染器的 KaTeX 版本 |
 
@@ -660,17 +674,18 @@ dsh-docx2md/
 │   └── toolkit.js     defineTool 的零依赖实现
 ├── py/
 │   ├── docxfile.py    .docx 打开与结构校验（坏输入转可读错误）
-│   ├── docx_scan.py   只读扫描（OLE 与 OMML 两族分开计数）
-│   ├── extract.py     段落 + 公式 + 预览图（OMML 在此转出 LaTeX）
+│   ├── docx_scan.py   只读扫描（OLE / OMML / 图片候选三类分开计数）
+│   ├── extract.py     段落 + 公式 + 预览图（OMML 在此转出 LaTeX，图片公式落占位）
 │   ├── omml.py        OMML → LaTeX 确定性转换器
+│   ├── imgformula.py  图片公式候选检测（形状启发式 + OLE 预览排除）
 │   ├── render.py      跨平台 WMF/EMF → PNG
 │   ├── build.py       段落 + LaTeX 表 → Markdown（OMML 自动预填）
-│   └── validate.py    六条铁律 + T9/T10 校验
+│   └── validate.py    六条铁律 + T9/T10/T11 校验
 ├── skills/docx2md/
 │   └── SKILL.md       技能说明（给 Agent 读）
 ├── docs/
 │   └── methodology.md 完整方法论（转换实验总结）
-├── test/              26 组测试（不进发布包）
+├── test/              27 组测试（不进发布包）
 ├── cordis.patch.yml   插件注册
 └── CHANGELOG.md
 ```

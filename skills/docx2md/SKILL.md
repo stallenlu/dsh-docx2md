@@ -6,20 +6,23 @@ description: 把含公式的 Word 文档转成带 LaTeX 的 Markdown：OLE 公�
 # DOCX → Markdown（含公式）
 
 把一份满是公式的 Word 文档转成 Markdown，难点**不在**段落和标题——那些是体力活。
-真正的难点是公式，而且 docx 里有**两族格式完全不同的公式**，走两条不同的路：
+真正的难点是公式，而且 docx 里有**三种载体完全不同的公式**，走三条不同的路：
 
 | 公式族 | 来源 | 存储 | 本插件的处理 |
 |---|---|---|---|
 | **OLE 公式** | Equation Editor / MathType（WPS 默认仍是它） | 私有二进制 MTEF，包在 `oleObjectN.bin` 里 | 渲染成 PNG → **视觉转写 LaTeX**（唯一不可自动化的一步） |
 | **OMML**（Word 原生） | Word 2007+ 默认插入；2016 后手敲 LaTeX 语法存下来也是它 | 结构化 XML（`m:oMath`），分式上下标全在树里 | **extract 阶段确定性转成 LaTeX**，不读图、不需要视觉 |
+| **图片公式** | 截图粘贴、扫描、从 PDF 拷贝 | 就是一张位图（`w:drawing` / `v:pict`），无结构 | 落成 `⟦EQ:img:文件名⟧` 占位 → 你读 `media/` 原件转写；**不转写也不丢**（build 生成可见图片引用） |
 
 > **以渲染出的位图为准，不以解析出的字符为准。** —— 这条军规针对 **OLE** 一族。
 > OMML 不是"解析出的字符"：它是完整的结构树，转换是确定性的，可靠性比看图更高。
+> 图片公式则是另一回事：像素就是全部内容，没有"解析"可言，只能读图。
 
-**先分清文档里是哪一族**：`docx2md_inspect` 的 `formulas`（OLE 数）与
-`formulas_omml`（OMML 数）。纯 OMML 文档可以不走第 3 步——extract 已经把
-LaTeX 转进 `eq_index.json` 的 `latex` 字段，build 自动预填，空 latex 表
-也能产出完整文档。混排文档里，只有 OLE 那部分需要读图。
+**先分清文档里是哪一族**：`docx2md_inspect` 的 `formulas`（OLE 数）、
+`formulas_omml`（OMML 数）、`formulas_image`（图片公式候选数）。纯 OMML 文档
+可以不走第 3 步——extract 已经把 LaTeX 转进 `eq_index.json` 的 `latex` 字段，
+build 自动预填，空 latex 表也能产出完整文档。混排文档里，OLE 与图片公式
+需要读图，OMML 不需要。
 
 ---
 
@@ -76,13 +79,15 @@ docx2md_build     →  合成为 Markdown 并校验（OMML 自动预填）
 docx2md_inspect(path="文档.docx")
 ```
 
-看四件事：
-- `formulas` / `formulas_omml` / `formulas_total` —— OLE 数、Word 原生数、总数。
-  **读图工作量只由 `formulas`（OLE）决定**；OMML 会被 extract 自动转好
+看五件事：
+- `formulas` / `formulas_omml` / `formulas_image` / `formulas_total` ——
+  OLE 数、Word 原生数、图片公式候选数、总数。
+  **读图工作量 = `formulas`（OLE）+ `formulas_image`（图片）**；OMML 自动转好
 - `variants` —— A 可解字符 / B 不可解；B 多说明必须走渲染
 - `render_engines.can_render` —— 本机能不能渲染。false 就先解决这个
-- `omml_note` / `no_formulas_note` —— 有 OMML 时的说明；两族都是 0 时的提示
-  （肉眼有公式但这里全 0，多半是图片式公式，本工具不覆盖）
+- `formulas_image` / `image_formula_candidates` / `image_note` —— 图片公式候选
+  （形状启发式，带 ratio/上下文证据；判断交给你，见第 3.5 步）
+- `omml_note` / `no_formulas_note` —— 有 OMML 时的说明；三类都是 0 时的提示
 
 ### 第 2 步：extract
 
@@ -141,6 +146,30 @@ docx2md_extract(path="文档.docx", outDir="work/")
    作者的约定，不是错误。照抄，不要"纠正"。
 4. **矩阵/多行公式最容易出错。** 数清楚有几行、每行的层级。这类公式通常正是
    变体 B，必须靠看图。
+
+### 第 3.5 步：图片公式（如果 inspect 报了 formulas_image）
+
+截图/扫描粘贴进来的公式在 docx 里就是一张位图。像素没有结构可解，工具
+**无法自动转换**它们——但绝不静默丢：extract 给每个候选生成
+`⟦EQ:img:文件名⟧` 占位并把原件抽进 `media/`；你什么都不做，build 也会
+把它落成**可见的图片引用**（`![图片公式 …](…)` + 溯源注释），交付的
+文档里公式位置仍然看得见。
+
+要做的是：读 `media/` 里这些图（和第 3 步读 PNG 一样），转写成 LaTeX，
+在 latex.json 里用 `"img:文件名"` 作键：
+
+```json
+{ "img:eq_formula.png": "\\sigma_{xy}=C_{ijkl}\\varepsilon_{kl}" }
+```
+
+**候选是形状启发式（扁条状行内图），不是结论。** `inspect` 的
+`image_formula_candidates` 与 `image_inventory.json` 给出每张图的宽高比、
+尺寸与所在段落文字——行内小图标也可能被算成候选，逐个过目再定：
+确实是公式 → 转写；其实是图标 → 把 latex.json 里对应键写成它的文字
+（如 `"img:icon.png": "\\text{✓}"`）或接受图片引用原样留着。
+
+交付前统计：`build` 返回值的 `image_placeholders`（未转写数）应当为 0
+或有明确理由；`validate` 的 T11 会查图片引用断链（断链=破图=公式又消失了）。
 
 ### 第 4 步：build
 
@@ -331,6 +360,7 @@ EOF
 | 段落里出现孤立的 `，` 或 `。` | 公式被拆成块后，标点留在了外面 |
 | 编号重复或跳号 | 局部修补了编号（见第四节） |
 | 读出的"公式"其实是截图/示意图 | `summary.formulas_paired_by_ordinal > 0`：那张图是退回顺序配对配上的，未经确认（见第 2 步） |
+| 产物里出现 `![图片公式 …]` 引用 | 该公式在 Word 里就是张图，未被转写（合法出路，但交付前该清零或给理由，见第 3.5 步） |
 | 中文变成 `����`，或出现 U+FFFD | Python 输出编码不是 UTF-8。正常情况下插件已在进程层与脚本层各夹一道（`pyEnv()` + `force_utf8_stdio()`）；若仍出现，说明有人绕过插件直接跑了 `py/*.py`，或用了改过的解释器 —— 先跑 `node test/encoding.mjs` 定位 |
 
 ### 公式显示不出来，先查这三件事
@@ -360,6 +390,8 @@ EOF
 - [ ] `formulas_missing == 0`
 - [ ] 公式总数与 `inspect` 报的一致
 - [ ] **`validation.warnings` 里没有 T10**（公式紧贴中文，渲染器可能不显示）
+- [ ] **`image_placeholders == 0`**，或每个残留的图片引用都是有意保留的
+      （inspect 报了 `formulas_image` 时）；`validation.errors` 里没有 T11 断链
 - [ ] **在目标渲染器里打开 md，抽看 3–5 个长公式与矩阵**（短公式正常不代表
       长公式正常，也不代表该渲染器认 `$` 语法）
 - [ ] 标题层级人工过了一遍

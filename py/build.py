@@ -74,6 +74,18 @@ def _boundary_after_formula(text):
     """
     return re.sub(r"(?<=\$)(?=" + CJK.pattern + r")", " ", text)
 
+
+def _img_rel_src(out_path, workdir, fname):
+    """图片公式在 md 里的引用路径：相对 md 文件定位 workdir/media/ 原件。
+
+    用相对路径而不是绝对路径，md 连同目录整体拷贝/上传后仍然能显示。
+    空格按 %20 转义，中文目录名保持原样（Markdown 允许）。
+    """
+    from urllib.parse import quote
+    media = os.path.join(workdir, "media", fname)
+    rel = os.path.relpath(media, os.path.dirname(os.path.abspath(out_path)) or ".")
+    return quote(rel.replace(os.sep, "/"), safe="/._-~")
+
 BLOCK_ENV = re.compile(
     r"\\begin\{(aligned|array|matrix|pmatrix|bmatrix|vmatrix|cases|split|"
     r"gather|align|eqnarray|equation)\}")
@@ -234,7 +246,9 @@ def main():
         headings = suggested
         heading_source = "auto-suggested (未确认，建议先 --suggest 再人工修订)"
 
-    known = {r["stream"] for r in index}
+    known = {r["stream"] for r in index if r.get("kind") != "image"}
+    # 图片公式不算 missing：Agent 不转写它也有合法出路（落成图片引用），
+    # 不像 OLE 缺表那样是「正文丢了公式」。它的账记在 image_placeholders。
 
     # ---- OMML 公式预填 ----
     # extract.py 已把 Word 原生公式（OMML）从 XML 确定性转成 LaTeX，
@@ -257,7 +271,9 @@ def main():
              # 回报实际生效的阈值：调用方据此确认参数有没有传进来，
              # 也便于事后复现「这一版用的是哪个值」。
              "long_tex_chars": args.long_tex_chars,
-             "omml_prefilled": omml_prefilled}
+             "omml_prefilled": omml_prefilled,
+             "image_placeholders": 0,   # 图片公式：落成注释+图片引用的处数
+             "image_transcribed": 0}    # Agent 已转写成 LaTeX 的图片公式数
 
     prev_display = False
 
@@ -302,7 +318,20 @@ def main():
                 name = seg
                 tex_val = latex.get(name)
                 if isinstance(tex_val, str) and tex_val.strip():
+                    if name.startswith("img:"):
+                        stats["image_transcribed"] += 1
                     pieces.append(("formula", tex_val))
+                elif name.startswith("img:"):
+                    # 图片公式且未转写：落成**可见**的图片引用 + 溯源注释。
+                    # 不能用纯 HTML 注释——注释渲染后不可见，那就又回到
+                    # 「静默丢公式」，正是本插件最忌讳的失败方式。
+                    stats["image_placeholders"] += 1
+                    fname = name[4:]
+                    src = _img_rel_src(args.out, args.workdir, fname)
+                    pieces.append(("text",
+                                   "![图片公式 %s](%s)<!-- 图片公式原件: %s；"
+                                   "在 latex.json 里用 \"img:%s\" 作键可替换成 LaTeX -->"
+                                   % (fname, src, fname, fname)))
                 else:
                     # 表里没有、或值不是字符串：明确标出来，不要静默跳过
                     stats["unresolved_placeholders"] += 1

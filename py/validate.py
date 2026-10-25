@@ -17,8 +17,10 @@
     T5  表格单元格内不得出现超长公式（T5_MAX_CELL_FORMULA 字符以上）
     T6  图片占位应为 HTML 注释
     T7  $$ 配对数为偶数（成对闭合）
-    T8  公式编号连续、无重复（可选，--expect-formulas 时检查总数）
+    T8  公式编号连续、无重复（可选，--expect-formulas 时检查总数；
+        display + inline + 图片公式引用 一起计入）
     T9  不得残留未解析的公式占位符或「未解析公式」注释
+    T11 图片公式的引用必须能解析到真实文件（断链=破图=公式又消失了）
 """
 import argparse
 import json
@@ -187,6 +189,20 @@ def main():
             % (len(marked), len(uniq), ", ".join(uniq[:12])
                + ("…" if len(uniq) > 12 else "")))
 
+    # 图片公式（build 对未转写的 ⟦EQ:img:…⟧ 生成的可见引用）。
+    # 它不算 T9——图片公式没有"未解析"问题，引用就是它的合法出路。
+    img_refs = re.findall(r"!\[图片公式 ([^\]]+)\]\(([^)]+)\)", md)
+    # T11: 图片公式的引用目标必须真实存在（相对 md 所在目录解析）。
+    # 断链 = 用户点开是破图，等于公式换了种方式消失。
+    if img_refs:
+        import os
+        base = os.path.dirname(os.path.abspath(args.file))
+        for alt, src in img_refs:
+            from urllib.parse import unquote
+            p = os.path.normpath(os.path.join(base, unquote(src)))
+            if not os.path.exists(p):
+                errors.append("T11: 图片公式引用断链: %s（%s）" % (src, alt))
+
     n_display = sum(1 for ln in lines if ln.strip() == "$$") // 2
     n_inline = len(re.findall(r"(?<!\$)\$(?!\$)[^$\n]+\$(?!\$)", md))
     n_tag = len(re.findall(r"\\tag\{", md))
@@ -197,6 +213,7 @@ def main():
         "chars": len(md),
         "display_blocks": n_display,
         "inline_formulas": n_inline,
+        "image_formulas": len(img_refs),
         "tags": n_tag,
         "errors": errors[:40],
         "warnings": warns[:40],
@@ -206,12 +223,14 @@ def main():
     }
     if args.expect_formulas is not None:
         report["expected_formulas"] = args.expect_formulas
-        if n_display + n_inline != args.expect_formulas:
+        # 图片公式以图片引用形态存在时也是"在文档里"，计入总数——
+        # expectFormulas 用的是 extract 的 formulas_total（含图片公式）。
+        if n_display + n_inline + len(img_refs) != args.expect_formulas:
             report["status"] = "FAIL"
             report["errors"].append(
-                "T8: 公式数 %d（display %d + inline %d）与预期 %d 不符"
-                % (n_display + n_inline, n_display, n_inline,
-                   args.expect_formulas))
+                "T8: 公式数 %d（display %d + inline %d + image %d）与预期 %d 不符"
+                % (n_display + n_inline + len(img_refs), n_display, n_inline,
+                   len(img_refs), args.expect_formulas))
             report["error_count"] += 1
 
     if args.json:
@@ -219,8 +238,8 @@ def main():
     else:
         print("文件: %s" % args.file)
         print("行数: %d  字符: %d" % (len(lines), len(md)))
-        print("公式: display %d / inline %d / tag %d"
-              % (n_display, n_inline, n_tag))
+        print("公式: display %d / inline %d / image %d / tag %d"
+              % (n_display, n_inline, len(img_refs), n_tag))
         print("错误: %d  警告: %d  状态: %s"
               % (len(errors), len(warns), report["status"]))
         for e in errors[:20]:

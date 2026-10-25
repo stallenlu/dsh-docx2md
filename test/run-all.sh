@@ -55,7 +55,7 @@ step "6. skill 契约（按 dsh-skill 真实校验复刻）"
 node test/skill-contract.mjs | tail -3
 note $?
 
-step "7. 校验器自测（T0–T10 每条规则都有反例）"
+step "7. 校验器自测（T0–T11 每条规则都有反例）"
 python3 test/validate_selftest.py | tail -3
 note $?
 
@@ -77,6 +77,10 @@ note $?
 
 step "7e. OMML 端到端（合成 docx：inspect→extract→build，空 latex 表也要出公式）"
 python3 test/omml_e2e.py | tail -2
+note $?
+
+step "7f. 图片公式端到端（占位不静默丢 / 可见引用 / 转写替换 / T11 断链）"
+python3 test/image_formula_e2e.py | tail -2
 note $?
 
 step "8. 边界输入"

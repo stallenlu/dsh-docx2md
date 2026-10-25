@@ -6,11 +6,13 @@
     python extract.py <input.docx> <outdir>
 
 产出（全部落在 <outdir>）:
-    paras.json      段落列表，公式位置标为 ⟦EQ:oleObjectN.bin⟧（OLE）
-                    或 ⟦EQ:ommlK⟧（Word 原生 OMML）
+    paras.json      段落列表，公式位置标为 ⟦EQ:oleObjectN.bin⟧（OLE）、
+                    ⟦EQ:ommlK⟧（Word 原生 OMML）或 ⟦EQ:img:文件名⟧（图片公式）
     eq_index.json   公式索引：stream / img / bytes / variant / pairing；
                     OMML 条目带 kind="omml" 与 latex（已确定性转出）
-    media/          从 docx 抽出的公式预览图（EMF/WMF 原格式）
+    media/          从 docx 抽出的公式预览图（EMF/WMF）与图片公式原件
+    image_inventory.json
+                    正文全部行内图片的形状证据与上下文（公式候选的判定依据）
     summary.json    统计摘要（供工具层直接返回给模型）
 
 设计要点:
@@ -39,6 +41,7 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from docxfile import BadDocument, fail, force_utf8_stdio, open_docx
+import imgformula as imgf
 import omml
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -46,6 +49,10 @@ R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 V = "{urn:schemas-microsoft-com:vml}"
 O = "{urn:schemas-microsoft-com:office:office}"
 M = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+
+
+def _ln(tag):
+    return tag.split("}")[-1] if "}" in tag else tag
 
 EQ_OPEN = "\u27e6EQ:"      # ⟦EQ:
 EQ_CLOSE = "\u27e7"        # ⟧
@@ -112,7 +119,8 @@ def main():
     # （heading_source="headings.json"），于是新文档的标题会挂到错误的段落上，
     # 且不会有任何提示。宁可清掉让人重新确认一次。
     for stale in ("paras.json", "eq_index.json", "summary.json",
-                  "build_report.json", "headings_suggested.json", "headings.json"):
+                  "build_report.json", "headings_suggested.json", "headings.json",
+                  "image_inventory.json"):
         p_stale = os.path.join(outdir, stale)
         if os.path.exists(p_stale):
             os.remove(p_stale)
@@ -125,16 +133,27 @@ def main():
                     os.remove(fp)
 
     # ---- 1. 段落文本 + 公式占位 ----
-    # 两族公式都要占位：
+    # 三种载体都要占位：
     #   OLE（MTEF 二进制）  → ⟦EQ:oleObjectN.bin⟧，LaTeX 靠读图转写
     #   OMML（Word 原生）   → ⟦EQ:ommlK⟧，LaTeX 在这里就确定性转好
+    #   图片（截图/扫描）    → ⟦EQ:img:media/xxx.png⟧，无法转换，
+    #                          build 落成可见注释 + 图片引用，绝不静默丢
     # 漏掉任何一族，正文都会「安静地丢公式」——段落文字照常输出，公式无影
     # 无踪，校验器也查不出来（占位符本来就没生成）。
+    #
+    # 图片占位只对**公式候选**生成（扁条状行内图，见 imgformula.py）。
+    # 示意图走同一占位会把正文搅成注释堆；它们进 image_inventory 供人核对。
+    ole_ids = imgf.ole_shape_ids(body)
+    ole_container = imgf.ole_preview_skip(body)
     paras = []
     omml_latex = []             # 与 ⟦EQ:ommlK⟧ 的 K 同序：转出的 LaTeX
+    img_hits = []               # 正文里落成占位的公式图（按出现顺序）
     for p in body.iter(W + "p"):
         buf = []
+        consumed = set()        # 已作为图片容器处理过的子树元素 id
         for node in p.iter():
+            if id(node) in consumed:
+                continue
             if node.tag == W + "t":
                 buf.append(node.text or "")
             elif node.tag == W + "tab":
@@ -151,7 +170,53 @@ def main():
                 tex = omml.to_latex(node)
                 omml_latex.append(tex)
                 buf.append("%somml%d%s" % (EQ_OPEN, len(omml_latex), EQ_CLOSE))
+            elif _ln(node.tag) in ("drawing", "pict"):
+                # 整棵子树一次性处理，防止嵌套元素被重复访问
+                for d in node.iter():
+                    consumed.add(id(d))
+                if imgf.is_ole_preview(node, ole_ids, ole_container):
+                    continue                    # OLE 预览图，走 OLE 路径
+                rid = imgf.picture_rid(node)
+                if not rid:
+                    continue
+                w_emu, h_emu = imgf.picture_size(node)
+                target = rel_map.get(rid) or ""
+                fname = target.split("/")[-1]
+                shape = imgf.classify_picture(w_emu, h_emu)
+                if shape != "formula":
+                    continue                    # 示意图：进清单，不进正文
+                img_hits.append({"file": fname, "target": target})
+                buf.append("%simg:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
         paras.append("".join(buf))
+
+    # 图片清单：正文里所有行内/浮动图片（排除 OLE 预览），带形状证据与
+    # 所在段落文字。公式候选只是启发式，最终判断交给人/Agent——这份清单
+    # 就是给它看的。
+    inventory = []
+    for pi, p in enumerate(body.iter(W + "p")):
+        has_text = bool(imgf.para_text(p))
+        listed = set()
+        for run in p.iter(W + "r"):
+            for child in run:
+                if _ln(child.tag) not in ("drawing", "pict"):
+                    continue
+                if imgf.is_ole_preview(child, ole_ids, ole_container):
+                    continue
+                rid = imgf.picture_rid(child)
+                if not rid or (pi, rid) in listed:
+                    continue
+                listed.add((pi, rid))
+                w_emu, h_emu = imgf.picture_size(child)
+                target = rel_map.get(rid) or ""
+                inventory.append({
+                    "file": target.split("/")[-1],
+                    "paragraph": pi,
+                    "shape": imgf.classify_picture(w_emu, h_emu),
+                    "inline_with_text": has_text,
+                    "ratio": (round(w_emu / h_emu, 2) if w_emu and h_emu else None),
+                    "h_px": (round(h_emu / imgf.EMU_PER_PX) if h_emu else None),
+                    "context": imgf.para_text(p)[:80],
+                })
 
     with open(os.path.join(outdir, "paras.json"), "w", encoding="utf-8") as f:
         json.dump(paras, f, ensure_ascii=False, indent=1)
@@ -208,6 +273,14 @@ def main():
             with open(os.path.join(media_dir, os.path.basename(rel_target)), "wb") as f:
                 f.write(z.read(zpath))
             extracted.add(zpath)
+    # 公式候选的位图原件也抽出来：它本身就是"预览图"，Agent 可直接读它转写
+    for hit in img_hits:
+        t = hit["target"]
+        zpath = t if t.startswith("word/") else "word/" + t
+        if zpath in names and zpath not in extracted:
+            with open(os.path.join(media_dir, os.path.basename(t)), "wb") as f:
+                f.write(z.read(zpath))
+            extracted.add(zpath)
 
     # ---- 4. 公式索引 ----
     def img_of(base):
@@ -254,16 +327,36 @@ def main():
             "latex": tex,
         })
 
+    # 图片公式：正文落成 ⟦EQ:img:文件名⟧ 占位。build 不替换它时会落成
+    # 可见注释 + 图片引用（绝不静默丢）；Agent 读 media/ 里的原件转写后，
+    # 用 "img:文件名" 作键写进 latex.json 即可替换成 LaTeX。
+    for hit in img_hits:
+        rows.append({
+            "stream": "img:%s" % hit["file"],
+            "kind": "image",
+            "img": hit["file"],
+            "bytes": 0,
+            "variant": "IMG",
+            "pairing": "n/a",          # 图片本身就是内容，不存在配对问题
+            "note": "以图片形式存在的公式候选（扁条状行内图）。读 media/%s "
+                    "转写 LaTeX，键用 \"img:%s\"；判断它其实是插图时，"
+                    "从正文删掉该占位即可。" % (hit["file"], hit["file"]),
+        })
+
     with open(os.path.join(outdir, "eq_index.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=1)
+
+    with open(os.path.join(outdir, "image_inventory.json"), "w", encoding="utf-8") as f:
+        json.dump(inventory, f, ensure_ascii=False, indent=1)
 
     # ---- 5. 摘要 ----
     n_empty = sum(1 for x in paras if not x.strip())
     counts = {}
     for r in rows:
         counts[r["variant"]] = counts.get(r["variant"], 0) + 1
-    ole_rows = [r for r in rows if r.get("kind") != "omml"]
+    ole_rows = [r for r in rows if r.get("kind") not in ("omml", "image")]
     omml_rows = [r for r in rows if r.get("kind") == "omml"]
+    image_rows = [r for r in rows if r.get("kind") == "image"]
     # 「缺图」只对 OLE 公式有意义：OMML 的 LaTeX 直接从 XML 转出，不需要图。
     no_media = [r["stream"] for r in ole_rows if not r.get("img")]
     # 靠下标回退配上的公式：图可能是插图的位图，必须让人知道。
@@ -272,10 +365,11 @@ def main():
     summary = {
         "paragraphs": len(paras),
         "paragraphs_nonempty": len(paras) - n_empty,
-        # 口径与 inspect 一致：formulas 只数 OLE；OMML 单独报。
+        # 口径与 inspect 一致：formulas 只数 OLE；OMML / 图片单独报。
         # 两个工具对「formulas」给两个数，混排文档里 expectFormulas 就会传错。
         "formulas": len(ole_rows),
         "formulas_omml": len(omml_rows),
+        "formulas_image": len(image_rows),
         "formulas_total": len(rows),
         "variants": counts,
         "media_extracted": len(extracted),
@@ -293,6 +387,13 @@ def main():
              % (len(by_ordinal), ", ".join(by_ordinal[:5])))
         ),
     }
+    if image_rows:
+        summary["next_image"] = (
+            "正文里有 %d 处以图片形式存在的公式候选（按形状判定，见 "
+            "image_inventory.json 的完整清单）。它们已落成 ⟦EQ:img:…⟧ 占位、"
+            "原件在 media/；读图转写后以 \"img:文件名\" 为键写进 latex.json。"
+            "不处理也不丢——build 会把它们落成可见注释与图片引用。"
+            % len(image_rows))
     if omml_rows:
         summary["next_omml"] = (
             "另有 %d 个 Word 原生公式（OMML），LaTeX 已直接写入 eq_index.json "

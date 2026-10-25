@@ -114,17 +114,45 @@ def main():
 
     body = root.find(W + "body")
 
-    paras = list(body.iter(W + "p"))
+    # 段落数只数**正文段落**——文本框（流程图）里的段落是图表的标签，
+    # 不是正文。口径必须与 extract.py 一致，否则 inspect 报 308 段、
+    # extract 只给 293 段，调用方会以为少了 15 段内容。
+    parents = {c: p for p in body.iter() for c in p}
+
+    def _nested_p(el):
+        anc = parents.get(el)
+        while anc is not None:
+            if anc.tag == W + "p":
+                return True
+            anc = parents.get(anc)
+        return False
+
+    paras = [p for p in body.iter(W + "p") if not _nested_p(p)]
     n_para = len(paras)
+    n_box = len(list(body.iter(W + "p"))) - n_para
 
     # 公式 → 预览图
+    #
+    # 扫描范围是**整篇文档**，不是「正文段落」：公式可能画在流程图的
+    # 文本框里（那样它就不属于任何正文段落，只按段落扫会漏掉——实测一份
+    # 145 公式的文档有 20 个公式住在流程图里）。段落只用来给公式定位
+    # 上下文，不用来圈定范围。
+    #
+    # 计数必须**按元素去重**：公式住在文本框里时，外层段落与框内段落
+    # 都能遍历到同一个 o:OLEObject，逐段相加会把它数两遍。口径要与
+    # extract.py 一致（那边用 outermost_p 判归属），否则 inspect 报 4
+    # 个公式、extract 产出 2 个占位符，调用方会以为丢了公式。
     pairs = {}
     n_eq = 0
-    for p in paras:
+    seen_ole = set()
+    for p in body.iter(W + "p"):
         imgs = [i.get(R + "id") for i in p.iter(V + "imagedata")]
         objs = list(p.iter(O + "OLEObject"))
-        n_eq += len(objs)
         for k, obj in enumerate(objs):
+            if id(obj) in seen_ole:
+                continue
+            seen_ole.add(id(obj))
+            n_eq += 1
             oid = (rel_map.get(obj.get(R + "id")) or "?").split("/")[-1]
             if k < len(imgs):
                 pairs[oid] = rel_map.get(imgs[k]) or None
@@ -192,6 +220,9 @@ def main():
     # 缺图的公式：只报告事实——它出现在哪个段落、那段文字是什么、
     # 同段落里还有几个公式、前后段落是什么。不写任何「这意味着什么」。
     # 工具看不到图，也不知道作者的排版意图，判断应交给调用方。
+    #
+    # 段落索引与 paras（正文段落）一致——调用方拿这个 index 去对照
+    # extract 的 paras.json，两者必须指同一段。
     missing_context = []
     if without:
         para_texts = ["".join(t.text or "" for t in p_.iter(W + "t")).strip()
@@ -225,6 +256,8 @@ def main():
 
     result = {
         "paragraphs": n_para,
+        # 文本框里的段落（流程图标签）单独报，不混进 paragraphs。
+        "paragraphs_in_textbox": n_box,
         # formulas 保持「OLE 公式数」的语义不变（现有测试与调用方依赖它）；
         # OMML 单独报，避免把两个族混进一个数字里掩盖差异。
         "formulas": n_eq,

@@ -23,3 +23,8 @@ Thumbs.db
 # 测试/调试残留
 /tmp/
 *.log
+
+# 用户丢进来的测试文档（不进仓库：体积大，且属于他人材料）
+*.docx
+*.docx:Zone.Identifier
+*.doc

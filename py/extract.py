@@ -57,10 +57,112 @@ def _ln(tag):
 EQ_OPEN = "\u27e6EQ:"      # ⟦EQ:
 EQ_CLOSE = "\u27e7"        # ⟧
 
+# 提取自检拦下「静默丢失」时的退出码。与「输入不是 docx」（3）区分开：
+# 那个是用户的问题，这个是工具的问题，排查方向完全不同。
+EXIT_SILENT_LOSS = 4
+
 
 def natkey(name):
     """按文件名里的数字自然排序（oleObject2 在 oleObject10 之前）。"""
     return int(re.sub(r"\D", "", name) or 0)
+
+
+def parent_map(root):
+    """{子元素: 父元素}。
+
+    标准库 ElementTree 没有 getparent()（那是 lxml 的），而判断「某节点是不是
+    位于某个段落内部」必须往上走。这里一次性把父子关系建出来。
+    """
+    return {c: p for p in root.iter() for c in p}
+
+
+def in_nested_p(node, host_p, parents):
+    """node 是否归属于 host_p 内部的**另一个** w:p（文本框的段落）。
+
+    文本框（w:txbxContent）里的段落自己也是一个 w:p。若外层段落把它展开，
+    同一段内容会被记两遍：框里的文字在外层再出现一次，框里的公式占位符
+    也出现两次。
+
+    判定：从 node 往上走，遇到的第一个 w:p 若是 host_p → 归 host 管（False）；
+    若是别的 w:p → 归那个嵌套段落管（True）。
+    """
+    anc = parents.get(node)
+    while anc is not None:
+        if anc.tag == W + "p":
+            return anc is not host_p
+        anc = parents.get(anc)
+    return False
+
+
+def outermost_p(node, parents):
+    """node 最外层的 w:p 祖先（没有则 None）。
+
+    **公式的归属按这个算**：公式画在流程图的文本框里时，它在 XML 上属于
+    那个嵌套段落，但在语义上属于「放着这张图的那一段」。若按最近的 w:p
+    归属，公式就会跟着嵌套段落一起被排除出正文——公式就这么丢了。
+
+    所以：文字归最近的段落（嵌套段落排除出正文，标签另存），公式归最外层
+    的段落（留在正文里，位置不丢）。两者各归其位，同一份内容只被记一次。
+    """
+    result = None
+    anc = parents.get(node)
+    while anc is not None:
+        if anc.tag == W + "p":
+            result = anc
+        anc = parents.get(anc)
+    return result
+
+
+def is_nested_paragraph(p, parents):
+    """这个 w:p 本身是不是位于某个文本框（另一个 w:p）内部。
+
+    文本框里的段落不是正文段落：它是流程图的标签。混进正文会让段落数
+    与原文对不上。
+    """
+    anc = parents.get(p)
+    while anc is not None:
+        if anc.tag == W + "p":
+            return True
+        anc = parents.get(anc)
+    return False
+
+
+def find_lost_placeholders(paras, rows):
+    """哪些公式「索引里有、正文里却没有占位符」。
+
+    返回排序后的 stream 名列表，空列表表示账目相符。
+
+    这是防「静默丢失」的最后一道网。背景：w:pict 容器既可能是公式的
+    预览图，也可能是**装着公式的画布**（Word 流程图：v:group 里既有
+    o:ole="t" 的预览 shape，也有 o:OLEObject 本身）。两者混为一谈时，
+    容器被整棵跳过，里面的公式占位符全部消失——正文照常输出，不报错
+    不告警，直到 build 阶段 T8 才对不上数，而那时原因已无从查证。
+    """
+    placeholders = set()
+    for x in paras:
+        placeholders.update(re.findall(r"⟦EQ:([^⟧]+)⟧", x))
+    indexed = {r["stream"] for r in rows if r.get("kind") != "image"}
+    return sorted(indexed - placeholders)
+
+
+def find_duplicated_placeholders(paras, rows):
+    """哪些公式的占位符**出现了不止一次**。
+
+    同样属于「账目对不上」，但方向相反：不是少，是多。
+
+    成因：同一份 XML 被遍历了两遍。实测踩过——公式画在流程图的文本框里，
+    而段落收集用 `body.iter(w+"p")`，框里的段落既被当作独立段落收进来、
+    又在外层段落里被访问一次，公式占位符因此出现两次。
+
+    多出来的占位符和少掉的一样坏：build 会拿公式数去对，数字永远对不上，
+    而且「多出来的那个」长得很像正文，排查时极易被当成「文档本来就这样」。
+    """
+    seen = {}
+    for x in paras:
+        for s in re.findall(r"⟦EQ:([^⟧]+)⟧", x):
+            seen[s] = seen.get(s, 0) + 1
+    indexed = {r["stream"] for r in rows if r.get("kind") != "image"}
+    return sorted(s for s, n in seen.items() if n > 1 and s in indexed)
 
 
 def get_eq_stream(raw_bin):
@@ -120,7 +222,7 @@ def main():
     # 且不会有任何提示。宁可清掉让人重新确认一次。
     for stale in ("paras.json", "eq_index.json", "summary.json",
                   "build_report.json", "headings_suggested.json", "headings.json",
-                  "image_inventory.json"):
+                  "image_inventory.json", "textbox_labels.json"):
         p_stale = os.path.join(outdir, stale)
         if os.path.exists(p_stale):
             os.remove(p_stale)
@@ -145,37 +247,72 @@ def main():
     # 示意图走同一占位会把正文搅成注释堆；它们进 image_inventory 供人核对。
     ole_ids = imgf.ole_shape_ids(body)
     ole_container = imgf.ole_preview_skip(body)
+    parents = parent_map(body)
     paras = []
     omml_latex = []             # 与 ⟦EQ:ommlK⟧ 的 K 同序：转出的 LaTeX
     img_hits = []               # 正文里落成占位的公式图（按出现顺序）
+    box_text = []               # 文本框里的文字（流程图标签），单独留痕
     for p in body.iter(W + "p"):
+        # 文本框里的段落不产生正文段落：它是流程图的标签。标签进
+        # textbox_labels.json（见下面），公式由最外层段落认领。
+        if is_nested_paragraph(p, parents):
+            continue
         buf = []
         consumed = set()        # 已作为图片容器处理过的子树元素 id
         for node in p.iter():
             if id(node) in consumed:
                 continue
             if node.tag == W + "t":
+                # 文本框里的文字是流程图的标签，不是正文。归那个嵌套
+                # 段落管，否则同一段内容会被记两遍；框里的文字另存到
+                # textbox_labels.json，不丢。
+                if in_nested_p(node, p, parents):
+                    continue
                 buf.append(node.text or "")
             elif node.tag == W + "tab":
                 buf.append("\t")
             elif node.tag == W + "br":
                 buf.append("\n")
             elif node.tag == O + "OLEObject":
+                # 公式占位：**无论公式住在正文还是文本框里，都只占一次**。
+                # 框里的公式也必须占位——公式不能丢；但它不能既算框外的、
+                # 又算框内的（同一条 XML 会被外层段落与框内段落各访问一次）。
+                # 归属规则：归**最外层**那个段落（放着这张图的那一段），
+                # 嵌套段落不认领它——否则公式会跟着标签一起被排除出正文。
+                if outermost_p(node, parents) is not p:
+                    continue
                 rid = node.get(R + "id")
                 tgt = (rel_map.get(rid) or "?").split("/")[-1]
                 buf.append("%s%s%s" % (EQ_OPEN, tgt, EQ_CLOSE))
             elif node.tag == M + "oMath":
                 # m:oMathPara（独立成段的公式）内部就是 m:oMath，
                 # iter 会先进 oMathPara 再进 oMath，这里只认 oMath。
+                if outermost_p(node, parents) is not p:
+                    continue
                 tex = omml.to_latex(node)
                 omml_latex.append(tex)
                 buf.append("%somml%d%s" % (EQ_OPEN, len(omml_latex), EQ_CLOSE))
             elif _ln(node.tag) in ("drawing", "pict"):
-                # 整棵子树一次性处理，防止嵌套元素被重复访问
-                for d in node.iter():
-                    consumed.add(id(d))
+                # 整棵子树一次性处理，防止嵌套元素被重复访问。
+                # 但**不能整棵跳过**：Word 画流程图时，公式可以嵌在同一个
+                # w:pict 的 v:group 里（实测：145 公式文档里有 3 个 pict 各
+                # 装着 6–8 个公式）。整棵标记为已消费会把里面的
+                # o:OLEObject 一并吞掉，公式占位符静默消失。
+                # 正确做法：只消费「图片本体」那部分，公式节点留给自己处理。
                 if imgf.is_ole_preview(node, ole_ids, ole_container):
+                    for d in node.iter():
+                        consumed.add(id(d))
                     continue                    # OLE 预览图，走 OLE 路径
+                if imgf.holds_ole_formula(node):
+                    # 容器里既有公式、又有图：只把图的部分标记为已消费，
+                    # 公式的 o:OLEObject 留给上面的分支生成占位符。
+                    for d in node.iter():
+                        if d.tag == O + "OLEObject":
+                            continue
+                        consumed.add(id(d))
+                else:
+                    for d in node.iter():
+                        consumed.add(id(d))
                 rid = imgf.picture_rid(node)
                 if not rid:
                     continue
@@ -188,6 +325,19 @@ def main():
                 img_hits.append({"file": fname, "target": target})
                 buf.append("%simg:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
         paras.append("".join(buf))
+
+    # 文本框里的段落不是正文段落——它们是流程图的标签。留在 paras 里会
+    # 让读者看到一堆莫名其妙的碎片（"VDDD3D程序结构图" / "结束" / "、位错密度等"
+    # 各自成段），而且会让段落数与原文对不上。
+    #
+    # 但它们也不能丢：那是文档里真实存在的文字。单独进 textbox_labels.json，
+    # 留给人核对。**框里的公式已经占位**（上面的循环），这里只收纯文字。
+    for p in body.iter(W + "p"):
+        if not is_nested_paragraph(p, parents):
+            continue
+        t = "".join(x.text or "" for x in p.iter(W + "t")).strip()
+        if t:
+            box_text.append(t)
 
     # 图片清单：正文里所有行内/浮动图片（排除 OLE 预览），带形状证据与
     # 所在段落文字。公式候选只是启发式，最终判断交给人/Agent——这份清单
@@ -349,6 +499,10 @@ def main():
     with open(os.path.join(outdir, "image_inventory.json"), "w", encoding="utf-8") as f:
         json.dump(inventory, f, ensure_ascii=False, indent=1)
 
+    # 文本框（流程图）里的标签文字：不是正文段落，但也不能丢。
+    with open(os.path.join(outdir, "textbox_labels.json"), "w", encoding="utf-8") as f:
+        json.dump(box_text, f, ensure_ascii=False, indent=1)
+
     # ---- 5. 摘要 ----
     n_empty = sum(1 for x in paras if not x.strip())
     counts = {}
@@ -362,9 +516,40 @@ def main():
     # 靠下标回退配上的公式：图可能是插图的位图，必须让人知道。
     by_ordinal = [r["stream"] for r in ole_rows if r.get("pairing") == "ordinal"]
 
+    # ---- 自检：公式索引里的每一条，正文里都必须有对应的占位符 ----
+    # 把「静默」变成「显式」：索引有、正文没有 → 直接报错退出。
+    lost = find_lost_placeholders(paras, rows)
+    if lost:
+        # 不用 fail()：那是「输入不对」，这里是「工具自己的账对不上」，
+        # 退出码要能区分（4 = 静默丢失已拦下）。
+        force_utf8_stdio()
+        sys.stderr.write(
+            "提取自检失败：正文里少了 %d 个公式占位符（%s…）。\n"
+            "索引里有、正文里没有，说明公式在提取时被整段跳过了——"
+            "这属于静默丢失，必须查清是哪种容器把公式吞了，"
+            "不能带着缺口往下走。\n"
+            % (len(lost), ", ".join(lost[:5])))
+        sys.exit(EXIT_SILENT_LOSS)
+
+    # ---- 自检（另一方向）：同一个公式的占位符不能出现多次 ----
+    # 少和多同样坏：多的会让公式数与 LaTeX 表永远对不上，而「多出来的
+    # 那个」长得很像正文，排查时极易被当成「文档本来就这样」。
+    dup = find_duplicated_placeholders(paras, rows)
+    if dup:
+        force_utf8_stdio()
+        sys.stderr.write(
+            "提取自检失败：%d 个公式的占位符在正文里出现了多次（%s…）。\n"
+            "同一份内容被收了两遍——通常是文本框（流程图）里的内容既被当作"
+            "独立段落、又在外层段落里被访问了一次。必须查清，不能带着重复往下走，"
+            "否则公式数永远对不上 LaTeX 表。\n"
+            % (len(dup), ", ".join(dup[:5])))
+        sys.exit(EXIT_SILENT_LOSS)
+
     summary = {
         "paragraphs": len(paras),
         "paragraphs_nonempty": len(paras) - n_empty,
+        # 文本框（流程图）里的文字：不是正文段落，但真实存在，单独留痕。
+        "textbox_labels": len(box_text),
         # 口径与 inspect 一致：formulas 只数 OLE；OMML / 图片单独报。
         # 两个工具对「formulas」给两个数，混排文档里 expectFormulas 就会传错。
         "formulas": len(ole_rows),

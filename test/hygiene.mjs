@@ -125,7 +125,7 @@ try {
     await rec('outDir 顶层只有已知产物', async () => {
       const names = (await readdir(outDir)).sort()
       const allowed = ['eq_index.json', 'image_inventory.json', 'media',
-        'paras.json', 'png', 'summary.json']
+        'paras.json', 'png', 'summary.json', 'textbox_labels.json']
       const extra = names.filter((n) => !allowed.includes(n))
       assert(extra.length === 0, `多出未知产物: ${extra.join(', ')}`)
     })

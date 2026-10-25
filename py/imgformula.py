@@ -47,7 +47,17 @@ def is_ole_preview(node, ole_ids, container_skip=None):
       shape 放在与 w:object 平级的 run 里，只按容器嵌套排除会漏。
     * container_skip（w:object 内部的元素 id 集）：DrawingML 包裹的 OLE
       预览没有 v:shape，只能靠"整个在 w:object 里"来认。
+
+    但**容器自己装着 OLE 公式时，以上检查一律不算预览图**。
+    实测踩过：Word 画流程图时，公式可以嵌在同一个 w:pict 的 v:group 里，
+    于是该 pict 内既有公式的 o:ole="t" 预览 shape，又有 o:OLEObject 本身。
+    若按「见 o:ole="t" 就算预览」判断，整棵 pict 被当成一张预览图跳过，
+    里面的公式占位符**全部消失**——正文照常输出，不报错不告警。
+    这正是本工具最忌讳的那类静默丢失。
     """
+    # 容器自己就是公式的宿主（o:OLEObject 在里面）→ 它不是预览图。
+    if next(node.iter(O + "OLEObject"), None) is not None:
+        return False
     for sh in node.iter(V + "shape"):
         if sh.get(O + "ole") == "t":
             return True
@@ -56,6 +66,19 @@ def is_ole_preview(node, ole_ids, container_skip=None):
     if container_skip and any(id(d) in container_skip for d in node.iter()):
         return True
     return False
+
+
+def holds_ole_formula(node):
+    """这个容器里是否直接装着 OLE 公式（o:OLEObject）。
+
+    用来区分两种长得很像的 w:pict：
+    * 公式的**预览图**（只有 v:shape + o:ole="t"，没有 o:OLEObject）
+    * **装着公式的画布**（Word 流程图：v:group 里既有预览 shape，
+      也有 o:OLEObject 本身）
+
+    两者混为一谈，公式就会从正文里静默消失——见 is_ole_preview 的说明。
+    """
+    return next(node.iter(O + "OLEObject"), None) is not None
 
 
 def ole_shape_ids(body):

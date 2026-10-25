@@ -239,6 +239,29 @@ def main():
     if confirmed is not None:
         headings = {int(k): v for k, v in confirmed.items()}
         heading_source = "headings.json"
+        # 标题表是**按段落序号**索引的。段落序号会随提取口径变化（文本框里的
+        # 段落现在被排除出正文），所以旧表可能已经对不上号。
+        #
+        # 对不上号的后果不是「标题挂错」这么简单：挂错的那一段如果恰好是
+        # 一个独占的公式段，那条公式会被当成标题直接输出——公式凭空消失，
+        # 校验器到 T8 才发现数对不上，而真正的错因（标题表过期）在报告里
+        # 完全看不出来。
+        #
+        # 实测踩过：一份 145 公式的文档，段落数从 308 变 293，旧的
+        # headings.json 把「段落 271」标成标题，而那正是唯一一条
+        # `oleObject139` 公式所在的段——公式被当成标题吞掉，T8 报 144≠145。
+        #
+        # 所以：标题指向的段落里若含公式占位符，直接拒绝采用这张表。
+        stale = [i for i, raw in enumerate(paras)
+                 if headings.get(i) and EQ_RE.search(raw or "")]
+        if stale:
+            sys.stderr.write(
+                "build 输入错误: headings.json 指向的段落里含公式占位符"
+                "（段落 %s）——这张标题表与当前 paras.json 对不上号，"
+                "会把公式当成标题输出，公式会凭空消失。\n"
+                "请重新生成：先跑 --suggest，人工修订后改名 headings.json。\n"
+                % ", ".join(str(i) for i in stale[:5]))
+            sys.exit(3)
     elif args.use_suggested:
         headings = suggested
         heading_source = "auto-suggested"

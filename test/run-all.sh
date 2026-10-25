@@ -83,6 +83,10 @@ step "7f. 图片公式端到端（占位不静默丢 / 可见引用 / 转写替�
 python3 test/image_formula_e2e.py | tail -2
 note $?
 
+step "7g. 画布内公式（w:pict 装公式，不能被当成预览图整棵跳过）"
+python3 test/pict_ole_e2e.py | tail -2
+note $?
+
 step "8. 边界输入"
 tmp=$(mktemp -d)
 printf 'not a zip' > "$tmp/fake.docx"

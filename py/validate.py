@@ -194,6 +194,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("file")
     ap.add_argument("--expect-formulas", type=int, default=None)
+    # 画布（流程图）内的公式已画进 PNG，不在 md 里单独出现。校验时要
+    # 从期望数里扣掉它们，否则带流程图的文档永远差这么多个。
+    ap.add_argument("--eq-index", default=None,
+                    help="eq_index.json 路径；给了就能识别画布内公式。")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--t5-max-cell-formula", type=int, default=T5_MAX_CELL_FORMULA,
                     help="表格单元格内公式的字符上限（默认 %d）。"
@@ -268,15 +272,31 @@ def main():
     }
     if args.expect_formulas is not None:
         report["expected_formulas"] = args.expect_formulas
-        # 图片公式以图片引用形态存在时也是"在文档里"，计入总数——
         # expectFormulas 用的是 extract 的 formulas_total（含图片公式）。
-        if n_display + n_inline + len(img_refs) != args.expect_formulas:
+        #
+        # 画布（流程图）内的公式**不在 md 里单独出现**：它们已经画进那张
+        # PNG 了。若仍按"md 里的公式数"去对全量公式数，带流程图的文档会
+        # 永远差这么多个。所以把画布内公式数从期望值里扣掉——它们确实
+        # 在文档里，只是以图片形态存在，和 image_formulas 是同一类。
+        n_canvas = 0
+        if args.eq_index:
+            try:
+                import json as _json
+                with open(args.eq_index, encoding="utf-8") as f:
+                    _rows = _json.load(f)
+                n_canvas = sum(1 for r in _rows if r.get("in_canvas"))
+            except (OSError, ValueError):
+                n_canvas = 0
+        expected_visible = args.expect_formulas - n_canvas
+        got = n_display + n_inline + len(img_refs)
+        if got != expected_visible:
             report["status"] = "FAIL"
             report["errors"].append(
                 "T8: 公式数 %d（display %d + inline %d + image %d）与预期 %d 不符"
-                % (n_display + n_inline + len(img_refs), n_display, n_inline,
-                   len(img_refs), args.expect_formulas))
+                % (got, n_display, n_inline, len(img_refs), expected_visible))
             report["error_count"] += 1
+        if n_canvas:
+            report["canvas_formulas"] = n_canvas
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=1))

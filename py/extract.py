@@ -41,6 +41,7 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from docxfile import BadDocument, fail, force_utf8_stdio, open_docx
+import canvas
 import docstyle
 import imgsize
 import imgformula as imgf
@@ -145,7 +146,10 @@ def find_lost_placeholders(paras, rows):
     placeholders = set()
     for x in paras:
         placeholders.update(re.findall(r"⟦EQ:([^⟧]+)⟧", x))
-    indexed = {r["stream"] for r in rows if r.get("kind") != "image"}
+    # 画布内的公式不算"丢失"：它们已经画进画布 PNG，是**图的一部分**，
+    # 不再单独占位。把它们算成丢失会让每次带流程图的文档都报假警。
+    indexed = {r["stream"] for r in rows
+               if r.get("kind") != "image" and not r.get("in_canvas")}
     return sorted(indexed - placeholders)
 
 
@@ -165,7 +169,8 @@ def find_duplicated_placeholders(paras, rows):
     for x in paras:
         for s in re.findall(r"⟦EQ:([^⟧]+)⟧", x):
             seen[s] = seen.get(s, 0) + 1
-    indexed = {r["stream"] for r in rows if r.get("kind") != "image"}
+    indexed = {r["stream"] for r in rows
+               if r.get("kind") != "image" and not r.get("in_canvas")}
     return sorted(s for s, n in seen.items() if n > 1 and s in indexed)
 
 
@@ -238,23 +243,6 @@ def main():
                 if os.path.isfile(fp):
                     os.remove(fp)
 
-    # ---- 1. 段落文本 + 公式占位 ----
-    # 三种载体都要占位：
-    #   OLE（MTEF 二进制）  → ⟦EQ:oleObjectN.bin⟧，LaTeX 靠读图转写
-    #   OMML（Word 原生）   → ⟦EQ:ommlK⟧，LaTeX 在这里就确定性转好
-    #   图片（截图/扫描）    → ⟦EQ:img:media/xxx.png⟧，无法转换，
-    #                          build 落成可见注释 + 图片引用，绝不静默丢
-    # 漏掉任何一族，正文都会「安静地丢公式」——段落文字照常输出，公式无影
-    # 无踪，校验器也查不出来（占位符本来就没生成）。
-    #
-    # 图片占位只对**公式候选**生成（扁条状行内图，见 imgformula.py）。
-    # 示意图走同一占位会把正文搅成注释堆；它们进 image_inventory 供人核对。
-    ole_ids = imgf.ole_shape_ids(body)
-    ole_container = imgf.ole_preview_skip(body)
-    parents = parent_map(body)
-    imgf.set_parent_map(parents)
-    # 图片自身的像素尺寸：判「扁条公式还是示意图」只认它（理由见 imgsize.py）。
-    media_px = imgsize.load_media_sizes(z)
     # ---- 1. 块级结构 + 行内格式 + 公式占位 ----
     # 三种公式载体都要占位：
     #   OLE（MTEF 二进制）  → ⟦EQ:oleObjectN.bin⟧，LaTeX 靠读图转写
@@ -281,6 +269,82 @@ def main():
     blocks = []                 # 块级结构（段落 / 表格 / 列表），build 按它输出
     notes = rich.read_notes(z)
     rels = rich.read_rels(z)
+
+    # media/ 必须在**画布渲染之前**就存在：画布 PNG 直接写进去。
+    # 早先它到第 3 步（抽预览图）才 makedirs，而画布在第 1 步就要写文件。
+    media_dir = os.path.join(outdir, "media")
+    os.makedirs(media_dir, exist_ok=True)
+
+    # ---- 画布（流程图）识别 ----
+    # v:group 画布在 docx 里不是一张图：它是并排放着的几十个形状（框、
+    # 菱形、箭头、标签）+ 若干 OLE 公式。早先只认 imagedata 和 OLE，画布
+    # 的骨架全部消失，正文里只剩一串互不相干的公式——读者完全看不出那
+    # 是一张流程图，而且不报错不告警。
+    #
+    # 画布必须**整块**变成一张图：文字层无法表达"这些框怎么连"。所以
+    # 画布内的公式不再各自占位（那样会和画布图重复），改由画布图承载。
+    canvas_hits = []            # 已渲染的画布
+    canvas_of = {}              # 画布元素 → 输出文件名
+
+    # 画布 SVG 要把框内的公式预览图**内嵌**成 data URI（EMF/WMF 浏览器不认，
+    # 必须先转成 PNG）。而媒体抽取和 EMF→PNG 渲染原本排在第 3、4 步，
+    # 画布渲染在第 1 步——顺序反了，画布里的公式框就会是空的（只剩绿框）。
+    #
+    # 所以先把画布**自己**引用到的那些媒体抽出来并转好，再渲染画布。
+    # 只处理画布用到的（通常十几张），不为此把全部 175 个媒体提前渲染。
+    _canvas_media = set()
+    for _g in canvas.find_canvases(body):
+        for _im in _g.iter(V + "imagedata"):
+            _rid = _im.get(R + "id")
+            _t = rel_map.get(_rid) if _rid else None
+            if _t:
+                _canvas_media.add(_t.split("/")[-1])
+    if _canvas_media:
+        os.makedirs(media_dir, exist_ok=True)
+        for _fn in _canvas_media:
+            _zp = "word/media/" + _fn
+            if _zp in names and not os.path.exists(os.path.join(media_dir, _fn)):
+                with open(os.path.join(media_dir, _fn), "wb") as _f:
+                    _f.write(z.read(_zp))
+        _wmf = [f for f in _canvas_media
+                if os.path.splitext(f)[1].lower() in (".emf", ".wmf")]
+        if _wmf:
+            try:
+                import render as _render
+                _png_dir = os.path.join(outdir, "png")
+                os.makedirs(_png_dir, exist_ok=True)
+                for _eng in _render.ENGINES:
+                    try:
+                        if _eng(media_dir, _png_dir, 1600):
+                            break
+                    except Exception:                     # noqa: BLE001
+                        continue
+            except Exception:                             # noqa: BLE001
+                pass
+
+    # 画布里的形状 id 集合：画布内的 OLE 公式，其 OLEObject 是画布 group 的
+    # **兄弟节点**（同在 w:pict 下），但 ShapeID 指向画布内部的 v:shape。
+    # 这些公式已经画进画布 PNG 了，如果还按 OLEObject 逐个占位，读者会在
+    # 同一段里看到「一张流程图 + 同一批公式再来一遍」，公式数也会虚高。
+    canvas_shape_ids = set()
+    for g in canvas.find_canvases(body):
+        for sh in g.iter(V + "shape"):
+            sid = sh.get("id")
+            if sid:
+                canvas_shape_ids.add(sid)
+
+    def _canvas_placeholder(g):
+        """把一个画布渲染成 media/ 里的 PNG，返回占位符文本。"""
+        if g in canvas_of:
+            return canvas_of[g]
+        fname = "canvas%d.png" % (len(canvas_hits) + 1)
+        out_png = os.path.join(media_dir, fname)
+        ok, why = canvas.render_canvas(g, rel_map, outdir, out_png)
+        canvas_of[g] = (fname, ok, why)
+        canvas_hits.append({"file": fname, "ok": ok, "reason": why})
+        if ok:
+            return "%sfig:%s%s" % (EQ_OPEN, fname, EQ_CLOSE)
+        return None
 
     def _emit_media(node, host_p):
         """把容器里的图片 / 公式按**文档顺序**变成占位符文本。
@@ -312,58 +376,75 @@ def main():
         # 但容器自己装着 OLEObject 时 is_ole_preview 会返回 False（见其
         # docstring），所以这里不会吞掉公式。
         skip_preview = imgf.is_ole_preview(node, ole_ids, ole_container)
-        for el in node.iter():
+
+        def _walk(el):
+            """按文档顺序遍历，画布子树整体短路。
+
+            用递归而不是 `node.iter()`：iter 没法在画布处停下。画布一旦
+            命中就必须**不再向下走**——否则画布里的公式/图片又各占一次位，
+            和画布图重复，读者会看到同一批公式两遍。
+            """
+            if el is not node and canvas.is_canvas(el):
+                ph = _canvas_placeholder(el)
+                if ph:
+                    out.append(ph)
+                return
             tag = el.tag
             if tag == O + "OLEObject":
-                if not owned(el):
-                    continue
-                rid = el.get(R + "id")
-                tgt = (rel_map.get(rid) or "?").split("/")[-1]
-                out.append("%s%s%s" % (EQ_OPEN, tgt, EQ_CLOSE))
+                if owned(el) and el.get("ShapeID") not in canvas_shape_ids:
+                    rid = el.get(R + "id")
+                    tgt = (rel_map.get(rid) or "?").split("/")[-1]
+                    out.append("%s%s%s" % (EQ_OPEN, tgt, EQ_CLOSE))
             elif tag == M + "oMath":
-                # m:oMathPara 内部就是 m:oMath，iter 先进 oMathPara 再进
-                # oMath，这里只认 oMath。
-                if not owned(el):
-                    continue
-                tex = omml.to_latex(el)
-                omml_latex.append(tex)
-                out.append("%somml%d%s" % (EQ_OPEN, len(omml_latex), EQ_CLOSE))
+                # m:oMathPara 内部就是 m:oMath；只认 oMath，避免双份。
+                if owned(el):
+                    tex = omml.to_latex(el)
+                    omml_latex.append(tex)
+                    out.append("%somml%d%s" % (EQ_OPEN, len(omml_latex), EQ_CLOSE))
             elif tag in (V + "imagedata", A + "blip"):
-                if skip_preview:
-                    continue
-                rid = el.get(R + "id") or el.get(R + "embed")
-                if not rid or rid in seen:
-                    continue
-                # 这一张是不是某个 OLE 公式的预览（逐张判，不能按容器判）
-                if imgf.leaf_is_ole_preview(el, ole_ids, node, ole_container):
-                    continue
-                seen.add(rid)
-                target = rel_map.get(rid) or ""
-                if not target:
-                    continue
-                fname = target.split("/")[-1]
-                w_px, h_px = media_px.get(fname, (None, None))
-                _lw, _lh = _leaf_wh(el, node)
-                shape = (imgf.classify_px(w_px, h_px)
-                         or imgf.classify_picture(_lw, _lh))
-                if shape == "formula":
-                    img_hits.append({"file": fname, "target": target})
-                    out.append("%simg:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
-                elif (w_px and h_px and not imgf.is_illustration_px(w_px, h_px)):
-                    # 已知尺寸、且小到像排版占位条（实测真实文档标题下有
-                    # 一张 2×2 的 image1.png，125 字节）——它不是内容，
-                    # 落成插图只会插一行破图。仍然记进清单留痕，只是不进
-                    # 正文；这是**唯一**允许"不进正文"的图，而且它没有
-                    # 任何可见内容可丢。
-                    fig_hits.append({"file": fname, "target": target,
-                                     "skipped": "排版占位条"})
-                else:
-                    # 示意图（以及尺寸读不出来、小到像排版占位条的）：
-                    # **必须进正文**。旧版在这里 continue，只把它记进
-                    # image_inventory 就算"留痕"，于是正文里一张不剩、
-                    # md 里连占位都没有——本工具最忌讳的静默丢失。
-                    fig_hits.append({"file": fname, "target": target})
-                    out.append("%sfig:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
+                _emit_picture(el)
+            # 叶子节点没有子节点，不必递归（也是热路径）
+            for ch in el:
+                _walk(ch)
+
+        def _emit_picture(el):
+            """一张图片 → 占位符（或按规则跳过）。"""
+            if skip_preview:
+                return
+            rid = el.get(R + "id") or el.get(R + "embed")
+            if not rid or rid in seen:
+                return
+            # 这一张是不是某个 OLE 公式的预览（逐张判，不能按容器判）
+            if imgf.leaf_is_ole_preview(el, ole_ids, node, ole_container):
+                return
+            seen.add(rid)
+            target = rel_map.get(rid) or ""
+            if not target:
+                return
+            fname = target.split("/")[-1]
+            w_px, h_px = media_px.get(fname, (None, None))
+            _lw, _lh = _leaf_wh(el, node)
+            shape = (imgf.classify_px(w_px, h_px)
+                     or imgf.classify_picture(_lw, _lh))
+            if shape == "formula":
+                img_hits.append({"file": fname, "target": target})
+                out.append("%simg:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
+            elif (w_px and h_px and not imgf.is_illustration_px(w_px, h_px)):
+                # 已知尺寸、且小到像排版占位条（实测真实文档标题下有一张
+                # 2×2 的 image1.png，125 字节）——它不是内容，落成插图只会
+                # 插一行破图。仍然记进清单留痕，只是不进正文；这是**唯一**
+                # 允许"不进正文"的图，而且它没有任何可见内容可丢。
+                fig_hits.append({"file": fname, "target": target,
+                                 "skipped": "排版占位条"})
+            else:
+                # 示意图（以及尺寸读不出来、小到像排版占位条的）：**必须
+                # 进正文**。旧版在这里跳过、只记进 image_inventory 就算
+                # "留痕"，于是正文里一张不剩、md 里连占位都没有——本工具
+                # 最忌讳的静默丢失。
+                fig_hits.append({"file": fname, "target": target})
+                out.append("%sfig:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
+
+        _walk(node)
         return "".join(out) or None
 
     def _leaf_wh(el, boundary):
@@ -512,6 +593,20 @@ def main():
                     "context": imgf.para_text(p)[:80],
                 })
 
+    # 画布（流程图）也登记进清单：它是一整块结构，用户核对"图齐不齐"时
+    # 必须能看到它，而不是只看到画布内部的零散图片。
+    for ci, ch in enumerate(canvas_hits, 1):
+        inventory.append({
+            "file": ch["file"],
+            "target": "canvas",
+            "paragraph": None,
+            "kind": "canvas",
+            "shape": "canvas",
+            "rendered": bool(ch["ok"]),
+            "reason": ch.get("reason") or "",
+            "context": "VML v:group 画布（流程图/示意图），整块渲染",
+        })
+
     with open(os.path.join(outdir, "paras.json"), "w", encoding="utf-8") as f:
         json.dump(paras, f, ensure_ascii=False, indent=1)
 
@@ -574,11 +669,15 @@ def main():
 
     pairs = {}
     pairing = {}                # stream -> "shape-id" | "ordinal"
+    ole_shape_id = {}           # stream -> OLEObject@ShapeID（判"是否在画布内"）
     for p in body.iter(W + "p"):
         imgs = [i.get(R + "id") for i in p.iter(V + "imagedata")]
         for k, obj in enumerate(p.iter(O + "OLEObject")):
             oid = (rel_map.get(obj.get(R + "id")) or "?").split("/")[-1]
-            target = shape_preview.get(obj.get("ShapeID"))
+            sid = obj.get("ShapeID")
+            if sid:
+                ole_shape_id[oid] = sid
+            target = shape_preview.get(sid)
             if target:
                 pairs[oid] = target
                 pairing[oid] = "shape-id"
@@ -590,7 +689,6 @@ def main():
                 pairing[oid] = "none"
 
     # ---- 3. 抽取预览图到 media/ ----
-    media_dir = os.path.join(outdir, "media")
     os.makedirs(media_dir, exist_ok=True)
     extracted = set()
     for rel_target in list(pairs.values()):
@@ -640,22 +738,37 @@ def main():
         try:
             eq = get_eq_stream(z.read(name))
         except Exception as exc:            # 损坏的 OLE 不应中断整批提取
-            rows.append({
+            row = {
                 "stream": base,
                 "img": img_of(base),
                 "bytes": 0,
                 "variant": "ERROR",
                 "pairing": pairing.get(base, "none"),
                 "error": str(exc),
-            })
+            }
+            # 异常分支也必须标 in_canvas：读不出 MTEF 与「在不在画布里」
+            # 是两件独立的事。漏标会让丢失自检把画布内公式报成"丢失"。
+            _sid = ole_shape_id.get(base)
+            if _sid and _sid in canvas_shape_ids:
+                row["in_canvas"] = True
+            rows.append(row)
             continue
-        rows.append({
+        row = {
             "stream": base,
             "img": img_of(base),
             "bytes": len(eq),
             "variant": mtef_variant(eq),
             "pairing": pairing.get(base, "none"),
-        })
+        }
+        # 画布内的公式：已经画进画布 PNG，不再单独占位。
+        # 必须标记出来，否则下游（丢失自检、T8 计数、latex.json 覆盖率）
+        # 会把它当成"应该有却找不到"的公式，天天报假警。
+        sid = ole_shape_id.get(base)
+        if sid and sid in canvas_shape_ids:
+            row["in_canvas"] = True
+            row["note"] = ("该公式位于流程图/画布内，已随画布整块渲染成图片，"
+                           "不再单独占位，无需转写。")
+        rows.append(row)
 
     # OMML 公式：LaTeX 已经确定性转出，直接带在索引里（kind=omml）。
     # build.py 会把它预填进公式表；Agent 的 latex.json 若给了同名键则以
@@ -781,6 +894,25 @@ def main():
             "正文里有 %d 张示意图，已落成 ![图](…) 图片引用（原件在 media/，"
             "EMF/WMF 引用 png/ 里渲染好的 PNG）。无需转写；若要调整某张的"
             "位置或删掉，直接编辑 md 即可。" % len(fig_hits))
+    # 画布（流程图）必须报出来：它是一整块结构，用户最关心「图还在不在」。
+    # 渲染失败时**不能静默**——必须说清是哪一块、为什么失败，因为一块
+    # 流程图消失比一张插图消失严重得多（它承载的是整章的逻辑关系）。
+    if canvas_hits:
+        ok_n = sum(1 for c in canvas_hits if c["ok"])
+        summary["canvases"] = len(canvas_hits)
+        summary["canvases_rendered"] = ok_n
+        if ok_n == len(canvas_hits):
+            summary["next_canvas"] = (
+                "文档里有 %d 块流程图/画布（VML v:group），已整块渲染成 "
+                "media/canvas*.png 并在正文落成 ![图](…) 引用。画布内的公式已"
+                "画进那张图，不再单独占位。" % ok_n)
+        else:
+            summary["canvas_warning"] = (
+                "有 %d 块画布渲染失败（%s），内容尚未还原：%s。"
+                "流程图里的形状与公式会整块丢失，请检查渲染环境。"
+                % (len(canvas_hits) - ok_n,
+                   ", ".join(c["file"] for c in canvas_hits if not c["ok"]),
+                   canvas_hits[0]["reason"] or "未知原因"))
     if omml_rows:
         summary["next_omml"] = (
             "另有 %d 个 Word 原生公式（OMML），LaTeX 已直接写入 eq_index.json "

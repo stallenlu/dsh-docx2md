@@ -194,6 +194,21 @@ pnpm remove dsh-docx2md
 全都没有时，`docx2md_inspect` 会明确告诉你，`docx2md_extract` 会保留原始
 矢量图、把 `render.ok` 置为 false——不会假装成功。
 
+**画布渲染**（用于把流程图 `v:group` 整块转成 PNG），需要无头浏览器：
+
+| 平台 | 引擎 | 说明 |
+|---|---|---|
+| Windows / WSL | Edge 或 Chrome 的 `--headless` | 自动探测 `msedge` / `chrome` / 常见安装路径 |
+
+没有可用浏览器时，画布**不会静默消失**：`summary.json` 里
+`canvases_rendered` 会小于 `canvases`，并给出 `canvas_warning` 指明哪一块、
+为什么失败。
+
+「渲染成功」的判据不是「PNG 存在且非空」——浏览器打开坏 URL 时会把
+一张「未找到文件」错误页截成 PNG，尺寸、字节数、退出码全都正常。
+所以截图时会同时 `--dump-dom`，DOM 里必须能找到 SVG 根上的
+`data-docx2md="canvas"` 标记，否则判失败。
+
 ---
 
 ## 用法
@@ -233,6 +248,10 @@ docx2md_extract(path, outDir?, render?)
 - `textbox_labels.json` —— 流程图**文本框里的标签文字**（"开始"、"结束"、
   "输出应力、应变"…）。它们不是正文段落（混进正文会让段落数与原文对不上），
   但也不能丢——那是文档里真实存在的文字，单独留痕供人核对
+- `media/canvasN.png` —— 流程图/示意图画布（`v:group`）**整块**渲染的图。
+  画布里的框、菱形、箭头、标签与公式都在这一张图里；画布内的公式因此
+  **不再单独占位**（`eq_index.json` 里标 `in_canvas: true`），否则同一批
+  公式会出现两遍
 
 ```
 docx2md_build(workDir, latex, out, suggestHeadings?, expectFormulas?)
@@ -257,7 +276,7 @@ docx2md_build(workDir, latex, out, suggestHeadings?, expectFormulas?)
 | `textbox_labels.json` | 流程图文本框里的标签文字（非正文段落，单独留痕） | ~0.2 KB |
 | `media/` | 原始矢量预览图（wmf/emf）+ 文档自带位图 | ~1.3 MB |
 | `png/` | 渲染后的可读位图，Agent 靠它转写 LaTeX | ~3.0 MB |
-| `summary.json` | 本次提取的统计 | ~0.3 KB |
+| `summary.json` | 本次提取的统计（含 `canvases` / `canvases_rendered`） | ~0.3 KB |
 
 **不会残留的东西**：渲染用的 `_render_report.json` 读完即删；坏输入不会留下空目录。
 `png/` 里出现的 `.jpeg` 不是残留，而是原文档自带的位图预览（`inspect` 的
@@ -342,6 +361,7 @@ Word 文档里有三样东西长得像正文段落，其实不是。搞混它们
 | 流程图文本框里的**标签文字** | `w:pict` → `v:shape` → `v:textbox` → `w:txbxContent` → `w:p` | 图的标注，不是正文 | `textbox_labels.json` |
 | 流程图文本框里的**公式** | 同上，但框里还有 `o:OLEObject` | 图的**内容**，必须保留 | 归**最外层**段落，占位符留在正文里 |
 | 图片公式的**预览位图** | `v:shape o:ole="t"` + `v:imagedata` | 公式的渲染图 | `media/` + `png/`，供读图转写 |
+| 流程图**画布本身** | `v:group`（内含框/菱形/箭头/标签 + OLE） | 一整块结构，文字层表达不了 | `media/canvasN.png`，正文里 `![图](…)`；画布内公式标 `in_canvas` |
 
 三条规则：
 

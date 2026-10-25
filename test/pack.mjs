@@ -49,6 +49,7 @@ const EXPECTED = new Set([
   'lib/toolkit.js',
   'package.json',
   'py/build.py',
+  'py/canvas.py',
   'py/docstyle.py',
   'py/docx_scan.py',
   'py/docxfile.py',

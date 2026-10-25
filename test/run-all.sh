@@ -95,6 +95,10 @@ step "7i. 通用 docx 结构（表格/列表/行内格式/超链接/脚注/合�
 python3 test/generic_struct_e2e.py | tail -2
 note $?
 
+step "7j. 流程图画布（v:group 整块渲染、画布内公式不重复占位）"
+python3 test/canvas_e2e.py | tail -2
+note $?
+
 step "8. 边界输入"
 tmp=$(mktemp -d)
 printf 'not a zip' > "$tmp/fake.docx"

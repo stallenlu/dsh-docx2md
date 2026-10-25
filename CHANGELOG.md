@@ -1,5 +1,117 @@
 # Changelog
 
+## 0.6.1
+
+### 修 0.6.0 里的四个画布 bug（都在真实文档上才暴露）
+
+0.6.0 的 `test/canvas_e2e.py` 是合成文档，跑得过；但真实文档上画布还是坏的。
+四个问题，每一个都**不报错**：
+
+1. **画布 PNG 是 Edge 的「未找到文件」错误页。**
+   `_to_windows_path()` 把 WSL 路径转成 `\\wsl.localhost\Ubuntu\...`，
+   拼 `file:///` + 反斜杠换斜杠得到 `file://////wsl.localhost/...`（五个斜杠），
+   Edge 认不出。修法：新增 `_file_url()`，UNC 走 `file://host/share/...`
+   （两个斜杠，主机名在 authority 位置），盘符走 `file:///C:/...`，并做 URL 编码。
+
+2. **「文件非空」被当成渲染成功。**
+   错误页也是合法的 PNG——尺寸对、字节数非零、退出码 0。所以失败检测必须
+   看**内容**：SVG 根加 `data-docx2md="canvas"`，截图时加 `--dump-dom`，
+   DOM 里没有这个标记就判失败。实测把 URL 打坏后，新检测正确返回失败
+   （旧检测会判成功）。
+
+3. **超采样把画布画到了左上角四分之一。**
+   `--window-size` 是 **CSS 像素**，2 倍超采样必须用
+   `--force-device-scale-factor=2`，不能把 2 乘进 window-size。
+
+4. **画布里的公式框是空的。**
+   画布在第 1 步渲染，但媒体抽取和 EMF/WMF→PNG 在第 3、4 步——顺序反了，
+   `_picture_data_uri()` 找不到文件，框里只剩白底。修法：渲染画布前先把
+   画布**自己**引用的那十几张媒体抽出来并转成 PNG（不为此提前渲染全部 175 张）。
+
+5. **相对 outDir 触发同一个 URL bug。**
+   `docx2md_extract a.docx out` 传的是相对路径，`_to_windows_path` 原样返回，
+   URL 又坏。修法：`scratch_dir` 一律 `abspath`。
+
+6. **`is_canvas` 把「只装公式的文本框壳」当成画布。**
+   判据从「有文字」改成「有连线 / 有填充几何形状 / 多图+标签」。
+   纯文本框 `v:group` 不算画布，里面的公式照常占位（否则 `pict_ole_e2e`
+   报「正文里少了 2 个公式占位符」——公式被画进图里，正文就没有占位符了）。
+
+### 失败原因不再写死
+
+`rasterize()` 改为返回 `(ok, reason)`，`render_canvas()` 原样透传。
+此前不管什么原因失败，`summary.json` 都写「没有可用的无头浏览器」——
+第 1 条那种 URL 错误因此被完全掩盖。
+
+## 0.6.0
+
+### 流程图（VML 画布）不再整块消失
+
+用户报告：「"程序流程图"那部分图几乎全部没有了，只有图中的公式。」
+
+流程图在 docx 里**不是一张图**，而是一个 `v:group` 画布，里面并排放着几十个
+形状：圆角矩形（步骤框）、菱形（判断）、箭头（连线）、文本框（标签），以及
+若干 OLE 公式（框里写的公式）。
+
+旧实现只认 `v:imagedata`（真正的位图）和 OLE/OMML 公式，**所有非图片形状
+一律不看**。后果是画布的骨架（框、菱形、箭头、标签）全部消失，只剩散落在
+正文里的一串公式——读者看到一堆互不相干的公式，完全看不出那是一张流程图。
+而且**不报错、不告警**：段落文字照常输出，校验器也查不出来。
+
+这不是特例，是 OOXML 的标准结构之一。文字层无法表达「这些框怎么连」，
+唯一忠实的表示是把整块画布画成一张图。
+
+#### 新增 `py/canvas.py`
+
+- `find_canvases(body)` 找出所有 `v:group`，并用 `_content_shapes()` 区分
+  「真画布」（有框/菱形/箭头/文字标签）与「插图容器」（只有几张并排的位图，
+  逐张抽取才是对的）。
+- `canvas_svg()` 把 VML 几何翻译成 SVG：`coordsize`/`coordorigin` 坐标系、
+  `spt` 形状语义（圆角矩形 / 菱形 / 箭头 / 文本框 / 连线）、填充与描边色、
+  框内文字（多段落按行）、内嵌图片（转 data URI）。嵌套画布递归平移。
+- `rasterize()` 用无头浏览器（Edge/Chrome）截图成 PNG。这是本机唯一能同时
+  处理 SVG 文字、颜色和内嵌图片的栅格化路径。
+
+#### 接入 `extract.py`
+
+- 画布**整块**落成 `media/canvas*.png`，正文里是 `⟦EQ:fig:canvas1.png⟧`。
+- 画布内的公式**不再单独占位**：它们已经画进那张图，再各自占位会让同一批
+  公式出现两遍。`eq_index.json` 里这些行标 `in_canvas: true`。
+  判据是 `OLEObject@ShapeID` 落在画布内的 `v:shape` 集合里——这是 Word 的
+  真实结构：OLE 宿主对象在画布**外层**，预览 shape 在画布**内层**。
+- `find_lost_placeholders` / `find_duplicated_placeholders` / `build.py` 的
+  `known` 集合 / `validate.py` 的 T8 都排除 `in_canvas` 行。否则每次带流程图
+  的文档都会报「缺 N 个公式」，而实际一个都不缺。
+- 画布渲染**失败不静默**：`summary.json` 里 `canvases_rendered` 与
+  `canvas_warning` 会明确指出哪一块、为什么失败。一块流程图消失比一张插图
+  消失严重得多——它承载的是整章的逻辑关系。
+- 画布登记进 `image_inventory.json`（`kind: "canvas"`），核对「图齐不齐」
+  时能看到它，而不是只看到画布内部的零散图片。
+- `build_report.json` 新增 `canvases` 与 `formulas_canvas` 两个计数。
+
+#### 顺手修掉的三个问题
+
+- **空 `v:imagedata` 吞掉文本框文字**：文本框和自选图形里有一个只写
+  `o:title=""`、没有 `r:id` 的占位 `<v:imagedata/>`。把它当图片处理会整块
+  `continue`，把框里的文字一并吞掉——实测流程图标题「VDDD3D程序结构图」和
+  「t=t+dt」就是这样丢的。判据改成「有没有真正指向媒体文件的 rId」。
+- **`media_dir` 定义晚于使用**：画布在第 1 步就要写 PNG，而 `media_dir` 到
+  第 3 步才创建。提前到画布渲染之前。
+- **画布渲染不用系统临时目录**：中间 SVG 写在 PNG 同目录、用完即删。本工具
+  全程只在 `outDir` 内落文件，这样产物可追溯、可删除，也才过 hygiene 检查。
+
+#### 测试
+
+新增 `test/canvas_e2e.py`（合成 docx，手写 OOXML，不依赖 python-docx），
+覆盖 20 项断言：画布识别、SVG 里确实有 polygon/rect/line/文字、extract 落成
+图片占位、画布内公式不重复占位、`in_canvas` 标记（含读 MTEF 失败的异常分支）、
+`media/canvas1.png` 存在、无临时文件残留、build 落成 `![图](...)` 引用。
+接入 `test/run-all.sh` 第 7j 步。
+
+真实文档（145 公式）实测：`canvases 2 / canvases_rendered 2`，
+`formulas_canvas 14`，正文里两张流程图完整还原（框、菱形、箭头、标签、
+框内公式都在），`validate --expect-formulas 145` PASS。
+
 ## 0.5.0
 
 ### 通用性：不再假设「正文 = 一串段落」（表格 / 列表 / 行内格式 / 超链接 / 脚注）

@@ -103,6 +103,10 @@ docx2md_extract(path="文档.docx", outDir="work/")
 - `media/` —— 原始矢量图（EMF/WMF）
 - `png/` —— 可读位图（**读这个目录**）
 - `textbox_labels.json` —— 流程图文本框里的标签文字（不是正文段落，单独留痕）
+- `media/canvasN.png` —— 流程图/示意图画布（`v:group`）整块渲染的图。画布里的
+  框、菱形、箭头、标签与公式都在这张图里，正文落成 `![图](…)` 引用。
+  **画布内的公式不再单独占位**（`eq_index.json` 标 `in_canvas: true`），
+  不要去找它们的 LaTeX——它们已经是图的一部分
 - `blocks.json` —— 正文的**真实块结构**：哪些是段落、哪些是表格、表格几行几列、
   每个格子归哪一行哪一列，以及每个 run 的行内格式（加粗/斜体/下划线/删除线/
   上下标）、超链接目标、脚注正文。`paras.json` 保持纯文本口径，两者用
@@ -115,6 +119,7 @@ docx2md_extract(path="文档.docx", outDir="work/")
 |---|---|---|
 | `formulas_paired_by_shape_id` | 按 `o:ole="t"` 的 shape 精确配到的公式数 | 这是可信的，直接读 |
 | `formulas_paired_by_ordinal` | 找不到 ShapeID、退回「同段落第 k 个公式配第 k 张图」的数量 | **不可信**，见下 |
+| `canvases` / `canvases_rendered` | 文档里有几块画布、成功渲染几块 | 两者不等时**必须处理**，见下 |
 
 `pairing` 字段写在 `eq_index.json` 每一条里（`shape-id` / `ordinal` / `none` /
 `xml`——OMML 是 `xml`，结构直接来自 XML，不涉及图片配对）。
@@ -125,6 +130,12 @@ docx2md_extract(path="文档.docx", outDir="work/")
 > 这条不是洁癖：早期版本一律按顺序配对，在公式前面夹着插图的段落里整体错位，
 > 实测一份 145 公式的文档错了 10 个，而且**没有任何提示**——模型会把程序截图
 > 读成"公式"，产出一个看起来完整、实则全错的结果。
+
+**`canvases_rendered < canvases` 时必须停下来处理**：说明有流程图/示意图
+画布没能渲染成图，它承载的是整块结构（框、箭头、标签以及框里的公式），
+比一张插图消失严重得多。`canvas_warning` 会指明是哪一块、为什么失败
+（通常是本机没有可用的无头浏览器）。此时**不要**把 `canvases` 当作
+"文档里只有这么多图"继续往下做——那等于把一整章的逻辑关系丢掉。
 
 **extract 自带一道自检**：它会核对 `eq_index.json` 里每个公式在正文中都有
 对应的 `⟦EQ:…⟧` 占位符，对不上就**报错退出（退出码 4）**并打印少了哪几个

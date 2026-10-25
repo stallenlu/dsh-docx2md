@@ -534,7 +534,11 @@ def main():
         headings = suggested
         heading_source = "auto-suggested (未确认，建议先 --suggest 再人工修订)"
 
-    known = {r["stream"] for r in index if r.get("kind") != "image"}
+    # in_canvas 的公式不参与"缺 LaTeX"统计：它们已经画进流程图 PNG，
+    # 正文里本来就没有占位符，也不需要转写。把它们算进来会让每一次带
+    # 流程图的构建都报"缺 N 个公式"，而实际一个都不缺。
+    known = {r["stream"] for r in index
+             if r.get("kind") != "image" and not r.get("in_canvas")}
     # 图片公式不算 missing：Agent 不转写它也有合法出路（落成图片引用），
     # 不像 OLE 缺表那样是「正文丢了公式」。它的账记在 image_placeholders。
 
@@ -560,6 +564,11 @@ def main():
              # 也便于事后复现「这一版用的是哪个值」。
              "long_tex_chars": args.long_tex_chars,
              "omml_prefilled": omml_prefilled,
+             # 画布内的公式：已随流程图整块渲染，正文里没有独立占位符。
+             # 必须单独报出来——否则 T8 拿 md 里的公式数去对 expectFormulas
+             # （它来自 inspect 的全量 OLE 计数）会永远差这么多个。
+             "formulas_canvas": sum(1 for r in index if r.get("in_canvas")),
+             "canvases": 0,             # 正文落成的画布（流程图）张数
              "image_placeholders": 0,   # 图片公式：落成注释+图片引用的处数
              "image_transcribed": 0,    # Agent 已转写成 LaTeX 的图片公式数
              "figures": 0,              # 正文落成的示意图处数
@@ -730,7 +739,12 @@ def main():
                     # 判定（不是公式，不该被拉出成块、也不该进 latex 表），
                     # 所以在这里单独接住，并标记成 figure 片让外层知道
                     # 这一段含有图（有图的段落不能当"公式独占段"处理）。
+                    #
+                    # 画布（流程图）走同一条路，但要单独计数：它承载的是
+                    # 整块结构，与普通插图不是一回事，报告里必须能分开看。
                     stats["figures"] += 1
+                    if name.startswith("fig:canvas"):
+                        stats["canvases"] += 1
                     fname = name[4:]
                     src = _img_rel_src(args.out, args.workdir, fname)
                     pieces.append(("figure",

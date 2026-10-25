@@ -124,8 +124,11 @@ try {
 
     await rec('outDir 顶层只有已知产物', async () => {
       const names = (await readdir(outDir)).sort()
-      const allowed = ['eq_index.json', 'image_inventory.json', 'media',
-        'paras.json', 'png', 'summary.json', 'textbox_labels.json']
+      // blocks.json = 正文块结构（表格/行内格式），docstruct.json = 判标题的
+      // 段落结构信号。两者都是 extract 的正式产物，不是临时文件。
+      const allowed = ['blocks.json', 'docstruct.json', 'eq_index.json',
+        'image_inventory.json', 'media', 'paras.json', 'png',
+        'summary.json', 'textbox_labels.json']
       const extra = names.filter((n) => !allowed.includes(n))
       assert(extra.length === 0, `多出未知产物: ${extra.join(', ')}`)
     })

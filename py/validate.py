@@ -21,6 +21,7 @@
         display + inline + 图片公式引用 一起计入）
     T9  不得残留未解析的公式占位符或「未解析公式」注释
     T11 图片公式的引用必须能解析到真实文件（断链=破图=公式又消失了）
+    T12 行内强调标记必须能闭合（`**a  **` 这类右定界符前带空白的写法不闭合）
 """
 import argparse
 import json
@@ -46,6 +47,40 @@ INLINE_BAD_ALIGN = re.compile(r"(?<!\\)&")              # 未被转义的 &
 
 # CJK 字符与全角标点：公式与它们相邻时缺边界，部分渲染器就不认定界符。
 CJK_CHAR = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
+
+def _bad_emphasis(prose):
+    """找出无法闭合的 ** / * 定界符对，返回 [(位置, 标记)]。
+
+    CommonMark 的 flanking 规则：开定界符后面不能紧跟空白，闭定界符前面
+    不能紧跟空白。违反时不是「渲染得难看」，而是星号按字面输出——正文里
+    凭空多出 `**`，看起来像转义 bug，但校验器原来完全不查。
+
+    不是假想问题：docx 里整段加粗的 run 常带尾随空格（"应用公式   "），
+    早期实现直接 `**%s**` 就生成 `**应用公式   **`，真实文档里 4 处。
+
+    只做**成对**判断：单个 `**` 是合法的左侧定界符（`正常 **加粗** 文本`
+    里第一个 `**` 前面是空格，但它没坏）。成对扫描才不会误报。
+    """
+    bad = []
+    for mark in ("**", "*"):
+        pos = []
+        i = 0
+        while True:
+            j = prose.find(mark, i)
+            if j < 0:
+                break
+            # "**" 扫描时跳过 "***" 里的重叠，避免重复计数
+            pos.append(j)
+            i = j + len(mark)
+        # 两两配对：0-1、2-3 … 奇数个则最后一个悬空（也是错误）
+        for k in range(0, len(pos) - 1, 2):
+            op, cl = pos[k], pos[k + 1]
+            after_open = prose[op + len(mark):op + len(mark) + 1]
+            before_close = prose[cl - 1:cl] if cl > 0 else ""
+            if after_open.isspace() or before_close.isspace():
+                bad.append((op, mark))
+                break
+    return bad
 
 
 def _inline_bodies(line):
@@ -118,6 +153,16 @@ def check(md_lines, t5_max_cell_formula=T5_MAX_CELL_FORMULA):
         # T6: 图片占位
         if re.search(r"!\[[^\]]*\]\(\s*\)", ln):
             warns.append("T6: 第 %d 行是空图片链接，建议改用 HTML 注释占位" % i)
+
+        # T12: 强调标记必须能闭合。先去掉行内公式与行内代码——里面的 *
+        # 是公式/代码的一部分，不是强调。
+        _prose = re.sub(r"\$[^$\n]*\$", "", ln)
+        _prose = re.sub(r"`[^`\n]*`", "", _prose)
+        _bad = _bad_emphasis(_prose)
+        if _bad:
+            errors.append(
+                "T12: 第 %d 行 %s 无法闭合（定界符内侧有空白，会按字面输出）: %s"
+                % (i, _bad[0][1], s[:90]))
 
     # T4: \tag 紧跟 \end{...}
     for i, ln in enumerate(md_lines, 1):

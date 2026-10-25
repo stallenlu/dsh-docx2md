@@ -176,9 +176,16 @@ if (doc && existsSync(doc)) {
     const ctxs = r.missing_preview_context ?? []
     if (ctxs.length > 0) {
       // 缺图公式的上下文是模型判断「图注还是正文」的依据，必须可读。
-      const withHan = ctxs.filter((c) => /[\u4e00-\u9fff]/.test(c.paragraph_text || ''))
+      //
+      // 不能只看 paragraph_text：流程图/画布类段落在 docx 里本来就是空的
+      // （整段只装公式与图），它的可读上下文在 prev/next 里。实测那份 145
+      // 公式文档的 3 条缺图段落 paragraph_text 全为空、prev/next 都有中文。
+      // 只查 paragraph_text 会把「本来就空」误判成「编码坏了」。
+      const han = (x) => /[\u4e00-\u9fff]/.test(x || '')
+      const withHan = ctxs.filter((c) =>
+        han(c.paragraph_text) || han(c.prev?.text) || han(c.next?.text))
       assert(withHan.length > 0,
-        `missing_preview_context 共 ${ctxs.length} 条，没有一条含汉字 —— 段落文字仍是乱码`)
+        `missing_preview_context 共 ${ctxs.length} 条，连 prev/next 也没有汉字 —— 中文输出已损坏`)
     }
   })
 } else {

@@ -108,6 +108,87 @@ BARE_HEADINGS = {
 }
 
 
+def render_runs(runs):
+    """把带格式的 Run 列表还原成 Markdown 行内语法。
+
+    为什么不能只拼文字：docx 里的加粗/斜体/下划线/删除线/上下标/超链接/
+    脚注都是**明确记录的结构**，不是排版噪声。一个格式转换器丢掉它们，
+    转出的 md 就只是"能读"，而不是"等价"。
+
+    相邻的加粗与斜体在 Markdown 里会粘成 "***"，定界符解析歧义，渲染
+    出来是字面星号。所以：一旦上一个输出以 "*" 结尾、这一段的标记又以
+    "*" 开头，就改用 HTML 标签（<strong>/<em>）——渲染结果一致，且没有
+    歧义。GFM 与绝大多数渲染器都支持行内 HTML。
+    """
+    out = []
+    notes = []
+
+    def wrap(text, tag):
+        """加行内标记，但把首尾空白挪到标记**外面**。
+
+        为什么必须挪：CommonMark 规定 `**a  **` 这种「右定界符前面是空白」
+        的写法**不能闭合**，渲染出来是两个字面星号。docx 里加粗 run 后面
+        常常带一个尾随空格（"由位错密度求塑性变形场，应用公式   " 整段加粗，
+        末尾三个空格），直接 `**%s**` 就会踩这个坑——语法上无效、内容上看
+        起来像 bug，而且校验器不查这个。
+
+        把空白挪到标记外，`**a**  ` 语义等价、渲染正确。
+        """
+        lead = text[:len(text) - len(text.lstrip())]
+        trail = text[len(text.rstrip()):]
+        core = text.strip()
+        if not core:
+            return text
+        if tag == "bold":
+            body = "**%s**" % core
+        elif tag == "italic":
+            body = "*%s*" % core
+        elif tag == "underline":
+            body = "<u>%s</u>" % core
+        elif tag == "strike":
+            body = "~~%s~~" % core
+        else:
+            body = core
+        return lead + body + trail
+
+    def push(s):
+        # 与上一段以 * 结尾、这一段以 * 开头 → 改 HTML，避免 *** 歧义
+        if out and out[-1].endswith("*") and s.startswith("*"):
+            if s.startswith("**") and s.endswith("**") and len(s) > 4:
+                s = "<strong>%s</strong>" % s[2:-2]
+            elif s.startswith("*") and s.endswith("*") and len(s) > 2:
+                s = "<em>%s</em>" % s[1:-1]
+        out.append(s)
+
+    for r in runs:
+        t = r.get("text") or ""
+        if t:
+            esc = t
+            # 上下标在 Markdown 里没有标准语法，用 HTML 的 sup/sub：
+            # 通用渲染器都认，且不破坏行内公式的 $ 定界。
+            if r.get("vert") == "sup":
+                esc = "<sup>%s</sup>" % esc
+            elif r.get("vert") == "sub":
+                esc = "<sub>%s</sub>" % esc
+            if r.get("strike") and esc.strip():
+                esc = wrap(esc, "strike")
+            if r.get("underline") and esc.strip():
+                esc = wrap(esc, "underline")
+            if r.get("italic") and esc.strip():
+                esc = wrap(esc, "italic")
+            if r.get("bold") and esc.strip():
+                esc = wrap(esc, "bold")
+            if r.get("link"):
+                esc = "[%s](%s)" % (esc, r["link"])
+            push(esc)
+        if r.get("footnote"):
+            # 脚注正文没有标准 Markdown 语法，用 GFM 脚注的退化形式：
+            # 保留可见的 [^fnN] 标记 + 文末集中列出。绝不静默丢。
+            notes.append(r["footnote"])
+            push("[^fn%d]" % len(notes))
+    return "".join(out), notes
+
+
 def load_json(path, default=None):
     if not os.path.exists(path):
         return default
@@ -145,6 +226,13 @@ def _heading_text(i, text, struct):
     原文已经带同样编号的（"i) 推导…"）不重复添加。
     """
     body = _strip_leading_figs(text).strip()
+    # 标题行不能带 ** / * / <u> 这类行内标记：Markdown 的 "# " 后面
+    # 再加粗会渲染成字面星号（标题本身已经是加粗了）。行内标记在正文
+    # 段落里照常保留，标题里剥掉——这是渲染约束，不是丢格式。
+    body = re.sub(r"\*\*(.+?)\*\*", r"\1", body)
+    body = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", body)
+    body = re.sub(r"</?u>", "", body)
+    body = re.sub(r"~~(.+?)~~", r"\1", body)
     marker = _auto_marker(struct, i)
     if marker and not body.startswith(marker):
         return marker + " " + body
@@ -475,9 +563,58 @@ def main():
              "image_placeholders": 0,   # 图片公式：落成注释+图片引用的处数
              "image_transcribed": 0,    # Agent 已转写成 LaTeX 的图片公式数
              "figures": 0,              # 正文落成的示意图处数
-             "orphan_punct_dropped": 0}  # 公式块后无处安放的孤立标点
+             "orphan_punct_dropped": 0,  # 公式块后无处安放的孤立标点
+             "tables": 0,               # 正文里还原出的表格数
+             "table_rows": 0,           # 表格的数据行数（不含表头）
+             "lists": 0}                # 识别出的列表项数
 
     prev_display = False
+    all_notes = []          # 脚注正文，文末统一列出
+
+    # ---- 块级结构：表格 / 段落按真实顺序输出 ----
+    # paras.json 只有段落；表格的行列关系在那里已经丢失。blocks.json 记的
+    # 是正文的真实结构（段落与表格各自的顺序），有它才能把表格还原成
+    # Markdown 表格。没有 blocks.json 时退回纯段落模式（兼容旧产物）。
+    block_seq = None
+    try:
+        _b = load_json(os.path.join(args.workdir, "blocks.json"))
+        if isinstance(_b, dict) and isinstance(_b.get("blocks"), list):
+            block_seq = _b["blocks"]
+    except (json.JSONDecodeError, OSError):
+        block_seq = None
+
+    def render_table(blk):
+        """把一张表渲染成 GFM 表格。
+
+        合并单元格在 Markdown 里没有语法：横向合并的格子留空（GFM 语义
+        就是"沿用上一格"），纵向合并同理。**不复制内容**——复制会让同一
+        段文字凭空出现两次。
+        """
+        rows = blk.get("rows") or []
+        if not rows:
+            return []
+        ncol = max(len(r) for r in rows) or 1
+        grid = []
+        for r in rows:
+            cells = []
+            for c in r:
+                txt = (c.get("text") or "").replace("|", "\\|").replace("\n", " ")
+                cells.append(txt)
+                # 横向合并：补齐被合并掉的列，留空
+                for _ in range(int(c.get("span") or 1) - 1):
+                    cells.append("")
+            while len(cells) < ncol:
+                cells.append("")
+            grid.append(cells[:ncol])
+        header = grid[0]
+        body = grid[1:]
+        lines = ["| " + " | ".join(header) + " |",
+                 "| " + " | ".join(["---"] * ncol) + " |"]
+        for row in body:
+            lines.append("| " + " | ".join(row) + " |")
+        stats["tables"] += 1
+        stats["table_rows"] += len(body)
+        return lines
 
     def push_display(tex):
         """输出一个 display 公式块，保证前后有空行。"""
@@ -490,7 +627,59 @@ def main():
         out.append("")
         prev_display = True
 
-    for i, raw in enumerate(paras):
+    # 按块结构走：段落与表格交替，顺序就是原文顺序。
+    # 没有 blocks.json 时构造一个「全是段落」的等价序列（向后兼容）。
+    if block_seq is None:
+        seq = [{"kind": "para", "index": i} for i in range(len(paras))]
+    else:
+        seq = []
+        para_cursor = 0
+        for blk in block_seq:
+            if blk.get("kind") == "table":
+                # 表格之前若有未被 blocks.json 记录的段落，补上
+                while para_cursor < blk.get("para_from", para_cursor):
+                    seq.append({"kind": "para", "index": para_cursor})
+                    para_cursor += 1
+                seq.append(blk)
+                para_cursor = blk.get("para_to", para_cursor)
+            else:
+                idx = blk.get("index")
+                if isinstance(idx, int) and idx >= para_cursor:
+                    while para_cursor < idx:
+                        seq.append({"kind": "para", "index": para_cursor})
+                        para_cursor += 1
+                    seq.append({"kind": "para", "index": idx,
+                                "runs": blk.get("runs"),
+                                "list": blk.get("list")})
+                    para_cursor = idx + 1
+        while para_cursor < len(paras):
+            seq.append({"kind": "para", "index": para_cursor})
+            para_cursor += 1
+
+    for item in seq:
+        if item.get("kind") == "table":
+            tbl = render_table(item)
+            if tbl:
+                if out and out[-1] != "":
+                    out.append("")
+                out.extend(tbl)
+                out.append("")
+                prev_display = False
+            continue
+        i = item["index"]
+        raw = paras[i] if i < len(paras) else ""
+        # 有 runs 时用带格式的版本（加粗/斜体/链接/脚注/上下标）；
+        # 没有时退回纯文本（旧产物、或该段来自降级路径）。
+        runs = item.get("runs")
+        if runs:
+            rendered, fnotes = render_runs(runs)
+            if rendered:
+                raw = rendered
+            for fn in fnotes:
+                all_notes.append(fn)
+        # 列表项：正文文字来自 paragraphs，编号来自 numbering.xml。
+        # 有序列表用 "1. "，无序用 "- "；Markdown 会自己重排序号。
+        lk = item.get("list")
         text = raw.strip()
         if not text:
             if out and out[-1] != "":
@@ -515,6 +704,17 @@ def main():
             out.append("")
             prev_display = False
             continue
+
+        # ---- 列表 ----
+        # Word 的列表项在正文里只是普通段落，形状由 numbering.xml 决定。
+        # 不还原它，转出的 md 里列表就是一串裸段落——读者看不出这是列表，
+        # 原文的分组/并列关系整个丢掉。Markdown 会自己重排序号，所以
+        # 有序列表统一写 "1. "，无序写 "- "。
+        if lk in ("bullet", "ordered"):
+            marker = "- " if lk == "bullet" else "1. "
+            stats["lists"] += 1
+            text = marker + text
+            raw = marker + raw
 
         # ---- 拆出公式 ----
         parts = EQ_RE.split(text)
@@ -660,6 +860,15 @@ def main():
             out.append(rest)
             out.append("")
             prev_display = False
+
+    # 脚注：正文里的 [^fnN] 标记必须有对应的定义，否则渲染器把它当字面
+    # 文本。Word 的脚注正文写在 footnotes.xml 里，不读它等于把注释丢掉。
+    if all_notes:
+        out.append("")
+        for k, note in enumerate(all_notes, 1):
+            out.append("[^fn%d]: %s" % (k, note.replace("\n", " ")))
+        out.append("")
+        stats["footnotes"] = len(all_notes)
 
     body = "\n".join(out)
     body = re.sub(r"\n{3,}", "\n\n", body).strip() + "\n"

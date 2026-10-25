@@ -294,6 +294,9 @@ await docx2md_build({
 | T7 | `$$` 奇数个（未闭合） |
 | **T9** | **公式没解析出来**（残留 `⟦EQ:...⟧`，或 build 写的 `<!-- 未解析公式 -->`） |
 | T8 | `expectFormulas` 给了时，公式总数不符 |
+| T10 | 行内公式与中文紧贴（部分渲染器不认定界符） |
+| T11 | 图片公式的引用断链（破图 = 公式又消失了） |
+| **T12** | **强调标记不闭合**（`**应用公式   **`，闭定界符前有空白，星号按字面输出） |
 
 T9 值得单独说：latex 表里缺的公式，build 会写成 HTML 注释。这种文档六条铁律
 全过、注释渲染后也看不见，但正文里确实少了公式。早期版本只查铁律，会给出
@@ -511,7 +514,7 @@ profile 的 `package.json` 里若有 `"dsh": { "profile": { "patchReload": "live
 7. **行内公式与中文之间要有空格** —— `中文$公式$中文` 在不少渲染器里不被识别为
    公式，用户看到的是 LaTeX 源码原样出现。`build.py` 会自动补，校验器用 **T10** 兜底。
 
-`docx2md_build` 内置 `validate.py` 会逐条检查（T1–T10）。
+`docx2md_build` 内置 `validate.py` 会逐条检查（T1–T12）。
 
 ---
 
@@ -745,6 +748,16 @@ node test/encoding.mjs 真实文档.docx    # 再验一份中文文档
   宽高比：公式预览是带 `o:ole="t"` 且 `ShapeID` 命中 `OLEObject` 的 shape，逐张判
   （`v:group` 里公式预览与拼图子图会共存，按容器整体判必然错）。仍**不要**用文字
   描述重画示意图——实测 7 轮全失败。
+- **按 OOXML 结构遍历，不假设「正文 = 一串段落」**。表格转 GFM 表格（行列对齐、
+  `gridSpan`/`vMerge` 合并列留空、绝不复制内容），列表按 `numPr` 转 `1.` / `-`，
+  行内加粗/斜体/下划线/删除线/上下标/超链接/脚注都还原成对应 Markdown。
+  `extract` 额外落 `blocks.json` 记录正文的真实块结构，`build` 按它的顺序输出，
+  段落与表格的交错顺序因此保住。没有 `blocks.json` 时退回纯段落模式（兼容旧产物）。
+  这是把 docx 当纯文本读的假设被推翻后的结果：早期版本对一份 4 行 2 列的表格
+  会转出「表头A / 表头B / 单元格1 / 单元格2」四行散段，行列关系消失且不报错。
+- **强调标记必须能闭合**。`**应用公式   **`（闭定界符前有空白）在 CommonMark 里
+  不闭合，星号按字面输出。docx 里整段加粗的 run 常带尾随空格，所以 `build` 会把
+  首尾空白挪到标记外面；校验器 **T12** 成对扫描定界符，内侧有空白就报错。
 - **只保证结构合规，不保证每个渲染器都认**。`docx2md_build` 的 PASS 意味着
   六条铁律与 T9/T10 都过了，但不同 Markdown 预览器对数学语法的支持差异很大。
   交付前**务必在目标渲染器里打开看一次**，尤其是长公式与矩阵。
@@ -772,12 +785,15 @@ dsh-docx2md/
 ├── py/
 │   ├── docxfile.py    .docx 打开与结构校验（坏输入转可读错误）
 │   ├── docx_scan.py   只读扫描（OLE / OMML / 图片候选三类分开计数）
-│   ├── extract.py     段落 + 公式 + 预览图（OMML 在此转出 LaTeX，图片公式落占位）
+│   ├── rich.py        按 OOXML 块级结构读取（表格/行内格式/链接/脚注/修订）
+│   ├── docstyle.py    段落结构信号（样式级别 / 自动编号 / 整段加粗）→ 判标题
+│   ├── imgsize.py     图片自身像素尺寸（判「扁条公式还是示意图」）
+│   ├── extract.py     正文块 + 公式 + 预览图 + 插图（OMML 在此转出 LaTeX）
 │   ├── omml.py        OMML → LaTeX 确定性转换器
 │   ├── imgformula.py  图片公式候选检测（形状启发式 + OLE 预览排除 + 画布内公式识别）
 │   ├── render.py      跨平台 WMF/EMF → PNG
-│   ├── build.py       段落 + LaTeX 表 → Markdown（OMML 自动预填）
-│   └── validate.py    六条铁律 + T9/T10/T11 校验
+│   ├── build.py       块结构 + LaTeX 表 → Markdown（表格/列表/行内格式）
+│   └── validate.py    六条铁律 + T9/T10/T11/T12 校验
 ├── skills/docx2md/
 │   └── SKILL.md       技能说明（给 Agent 读）
 ├── docs/

@@ -45,12 +45,14 @@ import docstyle
 import imgsize
 import imgformula as imgf
 import omml
+import rich
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 V = "{urn:schemas-microsoft-com:vml}"
 O = "{urn:schemas-microsoft-com:office:office}"
 M = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 
 
 def _ln(tag):
@@ -253,105 +255,201 @@ def main():
     imgf.set_parent_map(parents)
     # 图片自身的像素尺寸：判「扁条公式还是示意图」只认它（理由见 imgsize.py）。
     media_px = imgsize.load_media_sizes(z)
+    # ---- 1. 块级结构 + 行内格式 + 公式占位 ----
+    # 三种公式载体都要占位：
+    #   OLE（MTEF 二进制）  → ⟦EQ:oleObjectN.bin⟧，LaTeX 靠读图转写
+    #   OMML（Word 原生）   → ⟦EQ:ommlK⟧，LaTeX 在这里就确定性转好
+    #   图片（截图/扫描）    → ⟦EQ:img:media/xxx.png⟧，无法转换，
+    #                          build 落成可见注释 + 图片引用，绝不静默丢
+    # 漏掉任何一族，正文都会「安静地丢公式」——段落文字照常输出，公式无影
+    # 无踪，校验器也查不出来（占位符本来就没生成）。
+    #
+    # 图片占位只对**公式候选**生成（扁条状行内图，见 imgformula.py）。
+    # 示意图走同一占位会把正文搅成注释堆；它们进 image_inventory 供人核对。
+    ole_ids = imgf.ole_shape_ids(body)
+    ole_container = imgf.ole_preview_skip(body)
+    parents = parent_map(body)
+    imgf.set_parent_map(parents)
+    # 图片自身的像素尺寸：判「扁条公式还是示意图」只认它（理由见 imgsize.py）。
+    media_px = imgsize.load_media_sizes(z)
     paras = []
     omml_latex = []             # 与 ⟦EQ:ommlK⟧ 的 K 同序：转出的 LaTeX
     img_hits = []               # 正文里落成占位的公式图（按出现顺序）
     fig_hits = []               # 正文里落成占位的示意图（按出现顺序）
     box_text = []               # 文本框里的文字（流程图标签），单独留痕
     p_elems = []                # 与 paras 同序同口径的段落元素（供 docstyle 取结构）
-    for p in body.iter(W + "p"):
-        # 文本框里的段落不产生正文段落：它是流程图的标签。标签进
-        # textbox_labels.json（见下面），公式由最外层段落认领。
-        if is_nested_paragraph(p, parents):
-            continue
-        buf = []
-        consumed = set()        # 已作为图片容器处理过的子树元素 id
-        seen_figs = set()       # 本段已认领的图片 rId（跨容器去重）
-        for node in p.iter():
-            if id(node) in consumed:
-                continue
-            if node.tag == W + "t":
-                # 文本框里的文字是流程图的标签，不是正文。归那个嵌套
-                # 段落管，否则同一段内容会被记两遍；框里的文字另存到
-                # textbox_labels.json，不丢。
-                if in_nested_p(node, p, parents):
+    blocks = []                 # 块级结构（段落 / 表格 / 列表），build 按它输出
+    notes = rich.read_notes(z)
+    rels = rich.read_rels(z)
+
+    def _emit_media(node, host_p):
+        """把容器里的图片 / 公式按**文档顺序**变成占位符文本。
+
+        这是全流程唯一的「非文字内容 → 文本」出口。规则：
+          * OLE 公式       → ⟦EQ:oleObjectN.bin⟧
+          * OMML 公式      → ⟦EQ:ommlK⟧
+          * 公式候选图片    → ⟦EQ:img:文件名⟧
+          * 示意图 / 认不出 → ⟦EQ:fig:文件名⟧
+          * 公式的预览图    → 跳过（由 OLE 那条路负责，不能重复占位）
+
+        必须按 node.iter() 的**文档顺序**走，不能先收公式再收图片：
+        一个 v:group 里可以既有公式预览、又有插图（实测 p281：6 张三维图 +
+        6 个公式预览），顺序就是读者看到的顺序，打乱它等于改内容。
+        """
+        def owned(el):
+            """这个 OLE/OMML 是否归 host_p 这个段落认领。
+
+            host_p 为 None 表示「不按段落归属」（rich 层的回调不传段落）：
+            此时一律认领，因为每个块只会被遍历一次，不存在重复计数。
+            """
+            if host_p is None:
+                return True
+            return outermost_p(el, parents) is host_p
+
+        out = []
+        seen = set()
+        # 纯 OLE 预览图容器：里面没有别的内容，整棵跳过。
+        # 但容器自己装着 OLEObject 时 is_ole_preview 会返回 False（见其
+        # docstring），所以这里不会吞掉公式。
+        skip_preview = imgf.is_ole_preview(node, ole_ids, ole_container)
+        for el in node.iter():
+            tag = el.tag
+            if tag == O + "OLEObject":
+                if not owned(el):
                     continue
-                buf.append(node.text or "")
-            elif node.tag == W + "tab":
-                buf.append("\t")
-            elif node.tag == W + "br":
-                buf.append("\n")
-            elif node.tag == O + "OLEObject":
-                # 公式占位：**无论公式住在正文还是文本框里，都只占一次**。
-                # 框里的公式也必须占位——公式不能丢；但它不能既算框外的、
-                # 又算框内的（同一条 XML 会被外层段落与框内段落各访问一次）。
-                # 归属规则：归**最外层**那个段落（放着这张图的那一段），
-                # 嵌套段落不认领它——否则公式会跟着标签一起被排除出正文。
-                if outermost_p(node, parents) is not p:
-                    continue
-                rid = node.get(R + "id")
+                rid = el.get(R + "id")
                 tgt = (rel_map.get(rid) or "?").split("/")[-1]
-                buf.append("%s%s%s" % (EQ_OPEN, tgt, EQ_CLOSE))
-            elif node.tag == M + "oMath":
-                # m:oMathPara（独立成段的公式）内部就是 m:oMath，
-                # iter 会先进 oMathPara 再进 oMath，这里只认 oMath。
-                if outermost_p(node, parents) is not p:
+                out.append("%s%s%s" % (EQ_OPEN, tgt, EQ_CLOSE))
+            elif tag == M + "oMath":
+                # m:oMathPara 内部就是 m:oMath，iter 先进 oMathPara 再进
+                # oMath，这里只认 oMath。
+                if not owned(el):
                     continue
-                tex = omml.to_latex(node)
+                tex = omml.to_latex(el)
                 omml_latex.append(tex)
-                buf.append("%somml%d%s" % (EQ_OPEN, len(omml_latex), EQ_CLOSE))
-            elif _ln(node.tag) in ("drawing", "pict"):
-                # 整个容器处理**该容器里的每一张图**，而不是只取第一张。
-                #
-                # 历史坑（两层，都实测踩过）：
-                # 1. 整棵跳过 → Word 把公式嵌在同一个 v:group 里时，
-                #    o:OLEObject 被一起吞掉，公式静默消失。所以只消费图片本体。
-                # 2. 只取第一张 → 一个 pict 里并排放着十几张图（实测 p281：
-                #    6 张三维图 + 6 个公式预览；p257：8 张流程图块），
-                #    其余全部消失，且第一张的尺寸被当成全容器的尺寸。
-                # 现在逐张判：每张图自己决定是「公式候选 → 占位」还是
-                # 「示意图 → 正文插图占位」。
-                if imgf.is_ole_preview(node, ole_ids, ole_container):
-                    for d in node.iter():
-                        consumed.add(id(d))
-                    continue                    # 纯 OLE 预览图，走 OLE 路径
-                # 不整棵标 consumed：容器里可能既有公式预览、又有真插图。
-                for leaf in imgf.picture_leaves(node):
-                    if imgf.leaf_is_ole_preview(leaf["el"], ole_ids, node,
-                                                ole_container):
-                        continue                # 公式预览，归 OLE 那条路
-                    # 同一个 rId 在一段里只认领一次：mc:AlternateContent 的
-                    # Choice（DrawingML）与 Fallback（VML）两个分支指向同一份
-                    # 媒体，是同一个容器在迭代里的两次出现，不是两张图。
-                    # 不去重时 p265 的 image135.emf 会落两个占位。
-                    if leaf["rid"] in seen_figs:
-                        continue
-                    seen_figs.add(leaf["rid"])
-                    target = rel_map.get(leaf["rid"]) or ""
-                    if not target:
-                        continue
-                    fname = target.split("/")[-1]
-                    w_px, h_px = media_px.get(fname, (None, None))
-                    shape = (imgf.classify_px(w_px, h_px)
-                             or imgf.classify_picture(leaf["w"], leaf["h"]))
-                    if shape == "formula":
-                        img_hits.append({"file": fname, "target": target})
-                        buf.append("%simg:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
-                    elif imgf.is_illustration_px(w_px, h_px):
-                        # 示意图：**必须进正文**。旧版在这里 continue，
-                        # 只把它记进 image_inventory 就算"留痕"，于是
-                        # 正文里六张图一张不剩，md 里连占位都没有——
-                        # 这是本工具最忌讳的静默丢失。
-                        fig_hits.append({"file": fname, "target": target})
-                        buf.append("%sfig:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
-                # 图片本体已逐张认领；把容器子树标记为已消费，防止外层
-                # 再走一遍（公式的 o:OLEObject 依旧留给自己处理）。
-                for d in node.iter():
-                    if d.tag == O + "OLEObject":
-                        continue
-                    consumed.add(id(d))
-        paras.append("".join(buf))
-        p_elems.append(p)
+                out.append("%somml%d%s" % (EQ_OPEN, len(omml_latex), EQ_CLOSE))
+            elif tag in (V + "imagedata", A + "blip"):
+                if skip_preview:
+                    continue
+                rid = el.get(R + "id") or el.get(R + "embed")
+                if not rid or rid in seen:
+                    continue
+                # 这一张是不是某个 OLE 公式的预览（逐张判，不能按容器判）
+                if imgf.leaf_is_ole_preview(el, ole_ids, node, ole_container):
+                    continue
+                seen.add(rid)
+                target = rel_map.get(rid) or ""
+                if not target:
+                    continue
+                fname = target.split("/")[-1]
+                w_px, h_px = media_px.get(fname, (None, None))
+                _lw, _lh = _leaf_wh(el, node)
+                shape = (imgf.classify_px(w_px, h_px)
+                         or imgf.classify_picture(_lw, _lh))
+                if shape == "formula":
+                    img_hits.append({"file": fname, "target": target})
+                    out.append("%simg:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
+                elif (w_px and h_px and not imgf.is_illustration_px(w_px, h_px)):
+                    # 已知尺寸、且小到像排版占位条（实测真实文档标题下有
+                    # 一张 2×2 的 image1.png，125 字节）——它不是内容，
+                    # 落成插图只会插一行破图。仍然记进清单留痕，只是不进
+                    # 正文；这是**唯一**允许"不进正文"的图，而且它没有
+                    # 任何可见内容可丢。
+                    fig_hits.append({"file": fname, "target": target,
+                                     "skipped": "排版占位条"})
+                else:
+                    # 示意图（以及尺寸读不出来、小到像排版占位条的）：
+                    # **必须进正文**。旧版在这里 continue，只把它记进
+                    # image_inventory 就算"留痕"，于是正文里一张不剩、
+                    # md 里连占位都没有——本工具最忌讳的静默丢失。
+                    fig_hits.append({"file": fname, "target": target})
+                    out.append("%sfig:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
+        return "".join(out) or None
+
+    def _leaf_wh(el, boundary):
+        """一张图自己的 (宽, 高) EMU；取不到返回 (None, None)。"""
+        cur = el
+        while cur is not None:
+            nm = cur.tag.split("}")[-1] if "}" in cur.tag else cur.tag
+            if nm in ("extent", "ext"):
+                try:
+                    return int(cur.get("cx")), int(cur.get("cy"))
+                except (TypeError, ValueError):
+                    pass
+            if nm == "shape":
+                st = cur.get("style") or ""
+                mw = re.search(r"width\s*:\s*([^;]+)", st)
+                mh = re.search(r"height\s*:\s*([^;]+)", st)
+                if mw and mh:
+                    return imgf._emu_len(mw.group(1)), imgf._emu_len(mh.group(1))
+            if cur is boundary:
+                break
+            cur = parents.get(cur)
+        return None, None
+
+    def _media_cb(node):
+        """给 rich.runs_of 用的回调：返回占位文本或 None。"""
+        return _emit_media(node, None)
+
+    ctx = {"rels": rels, "notes": notes, "media": _media_cb}
+    raw_blocks = rich.blocks(z, body, ctx)
+
+    # 把 rich 的 Block 展开成「正文段落序列」+「块结构记录」。
+    #
+    # 为什么还要扁平成 paras：整条下游（公式占位计数、标题表按段落索引、
+    # 校验器 T8 数占位符）都建立在「一段一行」上。表格单元格是块级结构，
+    # 但它的文字同样必须进入 paras 参与占位/计数——否则表里的公式会被判
+    # 成"没出现过"。两者用 block_map 对齐：每个 paras 下标属于哪个块。
+    block_map = []              # paras 下标 → 块序号
+    for bi, b in enumerate(raw_blocks):
+        if b["kind"] == "para":
+            if is_nested_paragraph(b["el"], parents):
+                continue
+            runs = b["runs"]
+            # 空段落也要保留：它是段落分隔，build 用它控制空行
+            txt = rich.plain(runs)
+            paras.append(txt)
+            p_elems.append(b["el"])
+            block_map.append(len(blocks))
+            num = b.get("num")
+            lk = None
+            if num and num.get("numId"):
+                try:
+                    lk = docstyle.list_kind(z, num["numId"], num.get("ilvl"))
+                except Exception:                        # noqa: BLE001
+                    lk = None
+            blocks.append({"kind": "para", "index": len(paras) - 1,
+                           "runs": runs, "num": num, "list": lk})
+        elif b["kind"] == "table":
+            rows = []
+            first_cell_para = len(paras)     # 表格占用的 paras 区间起点
+            for row in b["rows"]:
+                cell_txt = []
+                for cell in row:
+                    runs = cell["runs"]
+                    t = rich.plain(runs).strip()
+                    if t:
+                        # 单元格文字进 paras（参与占位与计数），但**不**进
+                        # block_map——它属于表格块，不是独立正文段落。
+                        paras.append(t)
+                        p_elems.append(b["el"])
+                    cell_txt.append({"text": t, "span": cell["span"],
+                                     "vmerge": cell["vmerge"]})
+                rows.append(cell_txt)
+            blocks.append({"kind": "table", "rows": rows,
+                           "header": b["header"], "index": len(blocks),
+                           # 表格单元格的文字也进了 paras（参与公式占位与
+                           # 计数），build 必须跳过这段区间，否则同一段文字
+                           # 会既在表格里出现、又作为普通段落再出现一次。
+                           "para_from": first_cell_para,
+                           "para_to": len(paras)})
+        else:
+            # 未知块：降级成段落，不丢
+            paras.append(rich.plain(b.get("runs") or []))
+            p_elems.append(b.get("el"))
+            block_map.append(len(blocks))
+            blocks.append({"kind": "para", "index": len(paras) - 1,
+                           "runs": b.get("runs") or []})
 
     # 文本框里的段落不是正文段落——它们是流程图的标签。留在 paras 里会
     # 让读者看到一堆莫名其妙的碎片（"VDDD3D程序结构图" / "结束" / "、位错密度等"
@@ -416,6 +514,22 @@ def main():
 
     with open(os.path.join(outdir, "paras.json"), "w", encoding="utf-8") as f:
         json.dump(paras, f, ensure_ascii=False, indent=1)
+
+    # ---- 1a. 块级结构（表格 / 段落顺序 / 行内格式）----
+    # paras.json 是"一串段落"，它天然表达不了表格：表格的行列关系一旦被
+    # 平铺成段落就永久丢失。blocks.json 记的是正文的**真实结构**——
+    # 哪些是段落、哪些是表格、表格几行几列、每个格子归哪一行哪一列。
+    #
+    # 同时记下行内格式（加粗/斜体/下划线/删除线/上下标）、超链接目标、
+    # 脚注正文。这些都在 docx 里明明白白写着，丢掉它们不是"做不到"，
+    # 只是没读。格式转换器的正确性包含格式。
+    try:
+        with open(os.path.join(outdir, "blocks.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"blocks": blocks, "paragraphs": len(paras)},
+                      f, ensure_ascii=False, indent=1)
+    except (TypeError, ValueError) as exc:                # noqa: BLE001
+        sys.stderr.write("警告: 块结构落盘失败（表格将退化为段落）: %s\n" % exc)
 
     # ---- 1b. 段落结构信号（样式级别 / 自动编号 / 整段加粗）----
     # 为什么单独落一个文件而不是塞进 paras.json：paras.json 是「正文」，

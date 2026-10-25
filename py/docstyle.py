@@ -248,3 +248,31 @@ def paragraph_marks(z, paras_elems):
                 bold = bool(flags) and all(flags)
         out.append({"style": style, "marker": marker, "bold": bold})
     return out
+
+
+def list_kind(z, num_id, ilvl):
+    """这个自动编号段落是项目符号列表还是有序列表？都不是返回 None。
+
+    Word 的列表在正文里只有一个 <w:numPr>，真正的形状（•、1.、i)）由
+    numbering.xml 决定。不读它，转出的 md 里列表就是一串裸段落——
+    读者看不出这是列表，也就丢掉了原文的格式信息。
+
+    lowerRoman / upperLetter 这类多用于**标题编号**（"i)" / "A）"），
+    标题识别已经把它们补回标题里了，这里不再重复加列表标记，返回 None。
+    """
+    if not num_id:
+        return None
+    numbering = read_numbering(z)
+    lv = numbering.get(str(num_id)) or {}
+    try:
+        il = int(ilvl or 0)
+    except (TypeError, ValueError):
+        il = 0
+    if il not in lv:
+        return None
+    fmt = lv[il][0]
+    if fmt == "bullet":
+        return "bullet"
+    if fmt in ("decimal", "decimalZero", "decimalEnclosedCircle"):
+        return "ordered"
+    return None

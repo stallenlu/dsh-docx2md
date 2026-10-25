@@ -175,11 +175,14 @@ try:
     make_docx(docx, n_ole=3)
 
     # 1. extract：pict 内的公式必须一个不少地生成占位符
+    #    注意：正文里还会有 fig: 插图占位（示意图按设计进正文），
+    #    所以这里只数公式占位，不数总数。
     r = run("extract.py", docx, out)
     ph = placeholders(out)
-    if len(ph) != 3:
-        fails.append("extract: pict 内 3 个公式只生成了 %d 个占位符 %s"
-                     % (len(ph), ph))
+    ole_ph = [x for x in ph if not x.startswith(("fig:", "img:"))]
+    if len(ole_ph) != 3:
+        fails.append("extract: pict 内 3 个公式只生成了 %d 个公式占位符 %s"
+                     % (len(ole_ph), ole_ph))
     with open(os.path.join(out, "eq_index.json"), encoding="utf-8") as f:
         index = json.load(f)
     if len(index) != 3:
@@ -189,11 +192,13 @@ try:
     if missing:
         fails.append("extract: 这些公式在正文里没有占位符: %s" % sorted(missing))
 
-    # 2. 画布里的示意图不因修复而混进正文
+    # 2. 画布里的示意图必须**进正文**（0.5.0 起的行为）：
+    #    旧版只把它记进 image_inventory 就算"留痕"，正文里一张不剩，
+    #    md 里连占位都没有——那是静默丢失。
     with open(os.path.join(out, "paras.json"), encoding="utf-8") as f:
         paras = json.load(f)
-    if any("fig1.png" in p for p in paras):
-        fails.append("extract: 示意图混进了正文占位")
+    if not any("fig1.png" in p for p in paras):
+        fails.append("extract: 示意图没有进正文占位（静默丢失）")
 
     # 3. 自检：把公式从正文里拿掉，extract 必须报错退出（退出码 4）
     #    —— 用 monkeypatch 模拟「容器把公式吞了」的场景。
@@ -203,19 +208,33 @@ try:
             "import sys, os\n"
             "sys.path.insert(0, %r)\n"
             "import extract, imgformula\n"
-            "orig = imgformula.holds_ole_formula\n"
-            "imgformula.holds_ole_formula = lambda node: False\n"
-            "extract.holds_ole_formula = imgformula.holds_ole_formula\n"
+            # 模拟旧版那种「见 o:ole=\"t\" 就把整棵 pict 当预览图跳过」的\n"
+            # 判法：让 is_ole_preview 对所有容器都说 True。\n"
+            "imgformula.is_ole_preview = lambda node, ids, skip=None: True\n"
             "sys.argv = ['extract.py', %r, %r]\n"
             "extract.main()\n" % (PY_DIR, docx, os.path.join(work, "out2")))
     rp = subprocess.run([sys.executable, probe], cwd=PY_DIR,
                         capture_output=True, text=True)
-    if rp.returncode != 4:
-        fails.append("自检: 公式被吞时 extract 应以退出码 4 拦下，实际 %d"
-                     % rp.returncode)
-    if "静默丢失" not in (rp.stderr or ""):
-        fails.append("自检: 错误信息应说明是静默丢失，实际: %s"
-                     % (rp.stderr or "")[:200])
+    # 0.5.0 起公式的认领与「容器是不是预览图」解耦了：即便 is_ole_preview
+    # 对所有容器都说 True，o:OLEObject 依旧会被单独认领、照常占位。
+    # 所以这里断言的是**更强的不变量**——不管预览判定错成什么样，公式都
+    # 不会丢。真丢了就必须以退出码 4 拦下（自检兜底）。
+    probe_out = os.path.join(work, "out2")
+    if rp.returncode == 4:
+        if "静默丢失" not in (rp.stderr or ""):
+            fails.append("自检: 退出码 4 但错误信息没说明静默丢失: %s"
+                         % (rp.stderr or "")[:200])
+    elif rp.returncode != 0:
+        fails.append("自检: 预览判定全错时 extract 崩了（%d）: %s"
+                     % (rp.returncode, (rp.stderr or "")[:200]))
+    else:
+        with open(os.path.join(probe_out, "paras.json"), encoding="utf-8") as f:
+            probe_paras = json.load(f)
+        probe_ph = re.findall(r"⟦EQ:([^⟧]+)⟧", "".join(probe_paras))
+        probe_ole = [x for x in probe_ph if not x.startswith(("fig:", "img:"))]
+        if len(probe_ole) != 3:
+            fails.append("自检: 预览判定全错时公式丢了（占位 %d/3）%s"
+                         % (len(probe_ole), probe_ole))
 
     # 4. 端到端：build + validate 的公式数要对得上
     latex = os.path.join(work, "latex.json")

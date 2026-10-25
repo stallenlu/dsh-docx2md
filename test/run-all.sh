@@ -91,6 +91,10 @@ step "7h. 标题结构信号（样式级别 / Word 自动编号 / 整段加粗�
 python3 test/docstruct_e2e.py | tail -2
 note $?
 
+step "7i. 通用 docx 结构（表格/列表/行内格式/超链接/脚注/合并单元格）"
+python3 test/generic_struct_e2e.py | tail -2
+note $?
+
 step "8. 边界输入"
 tmp=$(mktemp -d)
 printf 'not a zip' > "$tmp/fake.docx"
@@ -120,19 +124,19 @@ step "11. 生命周期闭环（安装→使用→卸载→重装）"
 ./test/lifecycle.sh 2>&1 | tail -2
 note $?
 
-step "13. 跨平台路径语义（/tmp vs C:\tmp、/mnt/c、UNC 反查）"
+step "12. 跨平台路径语义（/tmp vs C:\tmp、/mnt/c、UNC 反查）"
 node test/paths.mjs 2>&1 | tail -2
 note $?
 
-step "15. 临时目录与残留（不建系统临时目录、坏输入不留空壳）"
+step "13. 临时目录与残留（不建系统临时目录、坏输入不留空壳）"
 node test/hygiene.mjs $DOC 2>&1 | tail -2
 note $?
 
-step "16. 中文编码（用 PYTHONIOENCODING=gbk 伪造中文 Windows 环境）"
+step "14. 中文编码（用 PYTHONIOENCODING=gbk 伪造中文 Windows 环境）"
 node test/encoding.mjs $DOC 2>&1 | tail -3
 note $?
 
-step "17. 三处代码一致性（源码 / packages / node_modules）"
+step "15. 三处代码一致性（源码 / packages / node_modules）"
 bash test/sync-check.sh > /tmp/_synccheck.log 2>&1
 sc=$?
 if [ $sc -eq 0 ]; then
@@ -148,16 +152,16 @@ else
   note 1
 fi
 
-step "18. 更新路径（改代码 / 改版本 / 断链 / 重装）"
+step "16. 更新路径（改代码 / 改版本 / 断链 / 重装）"
 ./test/update.sh 2>&1 | tail -2
 note $?
 
 if [ $WITH_PACK -eq 1 ]; then
-  step "19. 发布前：tarball 内容检查"
+  step "17. 发布前：tarball 内容检查"
   node test/pack.mjs 2>&1 | tail -3
   note $?
 
-  step "20. 发布前：从 tarball 真实安装（GitHub 路径）"
+  step "18. 发布前：从 tarball 真实安装（GitHub 路径）"
   . "$(dirname "$0")/lib/discover.sh"
   WIN_NODE="$(find_win_node 2>/dev/null || true)"
   if [ -n "$WIN_NODE" ] && [ -n "${WIN_TMP:-}" ]; then

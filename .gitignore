@@ -28,3 +28,10 @@ Thumbs.db
 *.docx
 *.docx:Zone.Identifier
 *.doc
+
+# 转换产物（docx 同级 <名字>_docx2md/ 是插件的默认工作目录）
+*_docx2md/
+# 转换出来的 Markdown：正文涉及他人材料，默认不进仓库。
+# 确实要留档，用 git add -f 显式添加。
+位错动力学*.md
+基于矢量位错密度*.md

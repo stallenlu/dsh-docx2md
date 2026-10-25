@@ -186,6 +186,11 @@ stream。这道闸拦的是「公式在提取时被整段跳过」——例如�
 确实是公式 → 转写；其实是图标 → 把 latex.json 里对应键写成它的文字
 （如 `"img:icon.png": "\\text{✓}"`）或接受图片引用原样留着。
 
+**其余图片是插图**（示意图、流程图、结果图），会按原位落成
+`![图](media/image3.png)`，不需要转写。`image_inventory.json` 的 `kind`
+字段标出 `formula` / `illustration`；标成 `formula` 但你判定其实是插图的，
+留空即可（build 照常落成图片引用）。
+
 交付前统计：`build` 返回值的 `image_placeholders`（未转写数）应当为 0
 或有明确理由；`validate` 的 T11 会查图片引用断链（断链=破图=公式又消失了）。
 
@@ -198,9 +203,10 @@ docx2md_build(workDir="work/", latex="latex.json", out="文档.md",
               suggestHeadings=true)
 ```
 
-读 `work/headings_suggested.json`。**中文文档的标题层级几乎不可能全自动识别**——
-`1．`、`A）`、`i）`、以及无编号的「引言」混用是常态。改好后存为 `headings.json`，
-再正式构建：
+读 `work/headings_suggested.json`。初稿已经读进了 docx 的结构信号（Word 样式、
+自动编号、加粗小节标签），能认出大部分标题，但**仍不是定稿**——`1．`、`A）`、
+`i）`、无编号的「引言」混用是中文文档常态，层级对不对要人看。改好后存为
+`headings.json`，再正式构建：
 
 ```
 docx2md_build(workDir="work/", latex="latex.json", out="文档.md",

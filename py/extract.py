@@ -41,6 +41,8 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from docxfile import BadDocument, fail, force_utf8_stdio, open_docx
+import docstyle
+import imgsize
 import imgformula as imgf
 import omml
 
@@ -222,7 +224,7 @@ def main():
     # 且不会有任何提示。宁可清掉让人重新确认一次。
     for stale in ("paras.json", "eq_index.json", "summary.json",
                   "build_report.json", "headings_suggested.json", "headings.json",
-                  "image_inventory.json", "textbox_labels.json"):
+                  "image_inventory.json", "textbox_labels.json", "docstruct.json"):
         p_stale = os.path.join(outdir, stale)
         if os.path.exists(p_stale):
             os.remove(p_stale)
@@ -248,10 +250,15 @@ def main():
     ole_ids = imgf.ole_shape_ids(body)
     ole_container = imgf.ole_preview_skip(body)
     parents = parent_map(body)
+    imgf.set_parent_map(parents)
+    # 图片自身的像素尺寸：判「扁条公式还是示意图」只认它（理由见 imgsize.py）。
+    media_px = imgsize.load_media_sizes(z)
     paras = []
     omml_latex = []             # 与 ⟦EQ:ommlK⟧ 的 K 同序：转出的 LaTeX
     img_hits = []               # 正文里落成占位的公式图（按出现顺序）
+    fig_hits = []               # 正文里落成占位的示意图（按出现顺序）
     box_text = []               # 文本框里的文字（流程图标签），单独留痕
+    p_elems = []                # 与 paras 同序同口径的段落元素（供 docstyle 取结构）
     for p in body.iter(W + "p"):
         # 文本框里的段落不产生正文段落：它是流程图的标签。标签进
         # textbox_labels.json（见下面），公式由最外层段落认领。
@@ -259,6 +266,7 @@ def main():
             continue
         buf = []
         consumed = set()        # 已作为图片容器处理过的子树元素 id
+        seen_figs = set()       # 本段已认领的图片 rId（跨容器去重）
         for node in p.iter():
             if id(node) in consumed:
                 continue
@@ -293,38 +301,57 @@ def main():
                 omml_latex.append(tex)
                 buf.append("%somml%d%s" % (EQ_OPEN, len(omml_latex), EQ_CLOSE))
             elif _ln(node.tag) in ("drawing", "pict"):
-                # 整棵子树一次性处理，防止嵌套元素被重复访问。
-                # 但**不能整棵跳过**：Word 画流程图时，公式可以嵌在同一个
-                # w:pict 的 v:group 里（实测：145 公式文档里有 3 个 pict 各
-                # 装着 6–8 个公式）。整棵标记为已消费会把里面的
-                # o:OLEObject 一并吞掉，公式占位符静默消失。
-                # 正确做法：只消费「图片本体」那部分，公式节点留给自己处理。
+                # 整个容器处理**该容器里的每一张图**，而不是只取第一张。
+                #
+                # 历史坑（两层，都实测踩过）：
+                # 1. 整棵跳过 → Word 把公式嵌在同一个 v:group 里时，
+                #    o:OLEObject 被一起吞掉，公式静默消失。所以只消费图片本体。
+                # 2. 只取第一张 → 一个 pict 里并排放着十几张图（实测 p281：
+                #    6 张三维图 + 6 个公式预览；p257：8 张流程图块），
+                #    其余全部消失，且第一张的尺寸被当成全容器的尺寸。
+                # 现在逐张判：每张图自己决定是「公式候选 → 占位」还是
+                # 「示意图 → 正文插图占位」。
                 if imgf.is_ole_preview(node, ole_ids, ole_container):
                     for d in node.iter():
                         consumed.add(id(d))
-                    continue                    # OLE 预览图，走 OLE 路径
-                if imgf.holds_ole_formula(node):
-                    # 容器里既有公式、又有图：只把图的部分标记为已消费，
-                    # 公式的 o:OLEObject 留给上面的分支生成占位符。
-                    for d in node.iter():
-                        if d.tag == O + "OLEObject":
-                            continue
-                        consumed.add(id(d))
-                else:
-                    for d in node.iter():
-                        consumed.add(id(d))
-                rid = imgf.picture_rid(node)
-                if not rid:
-                    continue
-                w_emu, h_emu = imgf.picture_size(node)
-                target = rel_map.get(rid) or ""
-                fname = target.split("/")[-1]
-                shape = imgf.classify_picture(w_emu, h_emu)
-                if shape != "formula":
-                    continue                    # 示意图：进清单，不进正文
-                img_hits.append({"file": fname, "target": target})
-                buf.append("%simg:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
+                    continue                    # 纯 OLE 预览图，走 OLE 路径
+                # 不整棵标 consumed：容器里可能既有公式预览、又有真插图。
+                for leaf in imgf.picture_leaves(node):
+                    if imgf.leaf_is_ole_preview(leaf["el"], ole_ids, node,
+                                                ole_container):
+                        continue                # 公式预览，归 OLE 那条路
+                    # 同一个 rId 在一段里只认领一次：mc:AlternateContent 的
+                    # Choice（DrawingML）与 Fallback（VML）两个分支指向同一份
+                    # 媒体，是同一个容器在迭代里的两次出现，不是两张图。
+                    # 不去重时 p265 的 image135.emf 会落两个占位。
+                    if leaf["rid"] in seen_figs:
+                        continue
+                    seen_figs.add(leaf["rid"])
+                    target = rel_map.get(leaf["rid"]) or ""
+                    if not target:
+                        continue
+                    fname = target.split("/")[-1]
+                    w_px, h_px = media_px.get(fname, (None, None))
+                    shape = (imgf.classify_px(w_px, h_px)
+                             or imgf.classify_picture(leaf["w"], leaf["h"]))
+                    if shape == "formula":
+                        img_hits.append({"file": fname, "target": target})
+                        buf.append("%simg:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
+                    elif imgf.is_illustration_px(w_px, h_px):
+                        # 示意图：**必须进正文**。旧版在这里 continue，
+                        # 只把它记进 image_inventory 就算"留痕"，于是
+                        # 正文里六张图一张不剩，md 里连占位都没有——
+                        # 这是本工具最忌讳的静默丢失。
+                        fig_hits.append({"file": fname, "target": target})
+                        buf.append("%sfig:%s%s" % (EQ_OPEN, fname, EQ_CLOSE))
+                # 图片本体已逐张认领；把容器子树标记为已消费，防止外层
+                # 再走一遍（公式的 o:OLEObject 依旧留给自己处理）。
+                for d in node.iter():
+                    if d.tag == O + "OLEObject":
+                        continue
+                    consumed.add(id(d))
         paras.append("".join(buf))
+        p_elems.append(p)
 
     # 文本框里的段落不是正文段落——它们是流程图的标签。留在 paras 里会
     # 让读者看到一堆莫名其妙的碎片（"VDDD3D程序结构图" / "结束" / "、位错密度等"
@@ -344,33 +371,69 @@ def main():
     # 就是给它看的。
     inventory = []
     for pi, p in enumerate(body.iter(W + "p")):
+        # 只统计**正文段落**：文本框里的副本（v:group 里同一张图又被
+        # 框内段落引用一次）不是独立的插图，否则 p271 会在 271/273/276
+        # 各出现一次，清单里同一张 image135.emf 记三遍。
+        if is_nested_paragraph(p, parents):
+            continue
         has_text = bool(imgf.para_text(p))
         listed = set()
-        for run in p.iter(W + "r"):
-            for child in run:
-                if _ln(child.tag) not in ("drawing", "pict"):
+        for node in p.iter():
+            if _ln(node.tag) not in ("drawing", "pict"):
+                continue
+            if imgf.is_ole_preview(node, ole_ids, ole_container):
+                continue
+            # 逐张登记：一个容器里可以并排放十几张图（实测 p281 有 12 张）。
+            # 只记第一张会让其余的原件既不在清单里、也不被抽出。
+            for leaf in imgf.picture_leaves(node):
+                if imgf.leaf_is_ole_preview(leaf["el"], ole_ids, node,
+                                            ole_container):
                     continue
-                if imgf.is_ole_preview(child, ole_ids, ole_container):
+                if leaf["rid"] in listed:
                     continue
-                rid = imgf.picture_rid(child)
-                if not rid or (pi, rid) in listed:
+                listed.add(leaf["rid"])
+                target = rel_map.get(leaf["rid"]) or ""
+                if not target:
                     continue
-                listed.add((pi, rid))
-                w_emu, h_emu = imgf.picture_size(child)
-                target = rel_map.get(rid) or ""
+                fname = target.split("/")[-1]
+                w_px, h_px = media_px.get(fname, (None, None))
+                w_emu, h_emu = leaf["w"], leaf["h"]
                 inventory.append({
-                    "file": target.split("/")[-1],
+                    "file": fname,
                     "target": target,
                     "paragraph": pi,
-                    "shape": imgf.classify_picture(w_emu, h_emu),
+                    # 形状口径与正文判定完全一致（像素优先），否则清单说
+                    # "插图"、正文当公式处理，两边各说各话。
+                    "shape": (imgf.classify_px(w_px, h_px)
+                              or imgf.classify_picture(w_emu, h_emu)),
                     "inline_with_text": has_text,
-                    "ratio": (round(w_emu / h_emu, 2) if w_emu and h_emu else None),
-                    "h_px": (round(h_emu / imgf.EMU_PER_PX) if h_emu else None),
+                    "ratio": (round(w_px / h_px, 2) if w_px and h_px
+                              else (round(w_emu / h_emu, 2) if w_emu and h_emu
+                                    else None)),
+                    "size_px": ([w_px, h_px] if w_px and h_px else None),
                     "context": imgf.para_text(p)[:80],
                 })
 
     with open(os.path.join(outdir, "paras.json"), "w", encoding="utf-8") as f:
         json.dump(paras, f, ensure_ascii=False, indent=1)
+
+    # ---- 1b. 段落结构信号（样式级别 / 自动编号 / 整段加粗）----
+    # 为什么单独落一个文件而不是塞进 paras.json：paras.json 是「正文」，
+    # 结构信号是判标题用的旁证，两者的消费方不同。放进 paras.json 会让
+    # build.py 的文本处理函数多一个非字符串元素要防，得不偿失。
+    #
+    # 这些信号正是「自动编号标题」的唯一线索：中文文档里 "iii)" 这类编号
+    # 从不写进文字，由 Word 按 numbering.xml 现算。不还原它们，正则只能
+    # 认出带字面前缀的少数标题（实测 12/32）。
+    try:
+        marks = docstyle.paragraph_marks(z, p_elems)
+    except Exception as exc:                              # noqa: BLE001
+        # 结构读取只是加分项：任何异常都不能让整次提取失败，退回纯正则。
+        sys.stderr.write("警告: 段落结构读取失败（退回纯正则判标题）: %s\n" % exc)
+        marks = []
+    if marks:
+        with open(os.path.join(outdir, "docstruct.json"), "w", encoding="utf-8") as f:
+            json.dump(marks, f, ensure_ascii=False, indent=1)
 
     # ---- 2. 公式 → 预览图映射 ----
     # rel_map 的 Target 形如 "media/image49.wmf"（相对 word/）。
@@ -596,6 +659,14 @@ def main():
             "原件在 media/；读图转写后以 \"img:文件名\" 为键写进 latex.json。"
             "不处理也不丢——build 会把它们落成可见注释与图片引用。"
             % len(image_rows))
+    # 示意图：不是公式，但同样不能丢。它们在正文里落成 ⟦EQ:fig:…⟧ 占位，
+    # build 直接转成 ![图](…)，无需任何后续人工动作。
+    if fig_hits:
+        summary["figures"] = len(fig_hits)
+        summary["next_figure"] = (
+            "正文里有 %d 张示意图，已落成 ![图](…) 图片引用（原件在 media/，"
+            "EMF/WMF 引用 png/ 里渲染好的 PNG）。无需转写；若要调整某张的"
+            "位置或删掉，直接编辑 md 即可。" % len(fig_hits))
     if omml_rows:
         summary["next_omml"] = (
             "另有 %d 个 Word 原生公式（OMML），LaTeX 已直接写入 eq_index.json "

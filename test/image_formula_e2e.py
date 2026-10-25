@@ -7,7 +7,8 @@
 
   1. inspect 报 formulas_image 与候选清单（ratio/上下文），不报结论。
   2. extract 给公式候选生成 ⟦EQ:img:文件名⟧ 占位、原件抽进 media/；
-     方形示意图**不**进正文（避免把正文搅成注释堆），只进清单。
+     **示意图落成 ⟦EQ:fig:文件名⟧ 占位**（正文里必须有它——旧版只记
+     清单不进正文，转出的 md 里插图全部消失，是本插件最忌讳的静默丢失）。
   3. build 未转写时落成**可见**的图片引用（不是纯注释——注释渲染后
      看不见，等于公式换了种方式消失）；latex.json 给 "img:文件名" 键
      后替换成 LaTeX。
@@ -127,8 +128,14 @@ try:
     paras = json.load(open(os.path.join(out, "paras.json"), encoding="utf-8"))
     if "⟦EQ:img:eq_formula.png⟧" not in paras[0]:
         fails.append("extract: 公式图未落成占位: %r" % paras[0])
-    if any("figure.png" in p for p in paras):
-        fails.append("extract: 示意图混进了正文占位")
+    # 示意图**必须**进正文：旧版在这里 continue（只记清单、正文里一个
+    # 占位都不留），结果 145 公式文档转出的 md 里六张插图全部消失，连
+    # 注释都没有——那是本工具最忌讳的静默丢失。现在落成 ⟦EQ:fig:…⟧，
+    # build 再换成可见的图片引用。
+    if not any("⟦EQ:fig:figure.png⟧" in p for p in paras):
+        fails.append("extract: 示意图没有落成正文占位: %r" % (paras,))
+    if any("figure.png" in p and "⟦EQ:img:figure.png⟧" in p for p in paras):
+        fails.append("extract: 示意图被当成了图片公式")
     if not os.path.exists(os.path.join(out, "media", "eq_formula.png")):
         fails.append("extract: 公式图原件没抽进 media/")
     inv = json.load(open(os.path.join(out, "image_inventory.json"), encoding="utf-8"))
@@ -155,6 +162,11 @@ try:
         fails.append("build: image_placeholders=%s，应为 1" % b.get("image_placeholders"))
     if b.get("unresolved_placeholders") != 0:
         fails.append("build: 图片公式不该计入 unresolved: %s" % b.get("unresolved_placeholders"))
+    # 示意图必须落成**可见**的图片引用（不是注释）。
+    if "![图](media/figure.png)" not in text_a and "![图](" not in text_a:
+        fails.append("build: 示意图没有落成可见引用: %r" % text_a[:200])
+    if b.get("figures") != 1:
+        fails.append("build: figures=%s，应为 1" % b.get("figures"))
 
     # 3b. build 转写后：LaTeX 替换，计数迁移
     latex = os.path.join(work, "latex.json")

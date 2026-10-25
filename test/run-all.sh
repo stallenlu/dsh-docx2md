@@ -87,6 +87,10 @@ step "7g. 画布内公式（w:pict 装公式，不能被当成预览图整棵跳
 python3 test/pict_ole_e2e.py | tail -2
 note $?
 
+step "7h. 标题结构信号（样式级别 / Word 自动编号 / 整段加粗）"
+python3 test/docstruct_e2e.py | tail -2
+note $?
+
 step "8. 边界输入"
 tmp=$(mktemp -d)
 printf 'not a zip' > "$tmp/fake.docx"

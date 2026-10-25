@@ -685,7 +685,7 @@ dsh-docx2md/
 │   └── SKILL.md       技能说明（给 Agent 读）
 ├── docs/
 │   └── methodology.md 完整方法论（转换实验总结）
-├── test/              27 组测试（不进发布包）
+├── test/              23 组测试（21 日常 + 2 发布前；不进发布包）
 ├── cordis.patch.yml   插件注册
 └── CHANGELOG.md
 ```

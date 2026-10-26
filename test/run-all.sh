@@ -99,6 +99,14 @@ step "7j. 流程图画布（v:group 整块渲染、画布内公式不重复占�
 python3 test/canvas_e2e.py | tail -2
 note $?
 
+step "7k. 三项排版信号（居中 / 颜色 / 首行缩进）"
+python3 test/parafmt_e2e.py | tail -2
+note $?
+
+step "7l. 探测器通用性（T13/T14 阈值随文档缩放自标定）"
+python3 test/detector_portability.py | tail -2
+note $?
+
 step "8. 边界输入"
 tmp=$(mktemp -d)
 printf 'not a zip' > "$tmp/fake.docx"

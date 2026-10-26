@@ -36,6 +36,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import zipfile
 from xml.etree import ElementTree as ET
@@ -758,6 +759,51 @@ def main():
             with open(os.path.join(media_dir, fname), "wb") as f:
                 f.write(z.read(zpath))
             extracted.add(zpath)
+
+    # ---- 3b. 正文插图里的 EMF/WMF 也要渲染成 PNG ----
+    #
+    # build 的 _img_rel_src 会把 .emf/.wmf 引用改指向 png/ 里的同名 PNG，
+    # **前提是那张 PNG 存在**——不存在就退回原件，浏览器不认 .emf，读者
+    # 只会看到一个破图标（实测 image135.emf 就是这样：正文里图是空的）。
+    #
+    # 早先只为画布媒体渲染（画布 SVG 要内嵌 data URI），正文里的 standalone
+    # 插图不在其中，于是它们永远没有 PNG 版。这里补上。
+    #
+    # 只渲染**正文真的引用到**的那几张，而不是 media/ 里的全部 147 张
+    # EMF/WMF：后者大多是公式预览图（转成 LaTeX 后根本不出现在 md 里），
+    # 全渲染一遍要几分钟且毫无用处。引擎按目录工作，所以把要渲染的文件
+    # 单独拷进一个临时目录再交给它。
+    _need = set()
+    for _hit in fig_hits:
+        _f = _hit.get("file") or ""
+        if os.path.splitext(_f)[1].lower() in (".emf", ".wmf"):
+            _need.add(_f)
+    _need = {f for f in _need
+             if not os.path.exists(os.path.join(outdir, "png",
+                                                os.path.splitext(f)[0] + ".png"))}
+    if _need:
+        png_dir = os.path.join(outdir, "png")
+        os.makedirs(png_dir, exist_ok=True)
+        _sel = os.path.join(outdir, "_render_sel")
+        os.makedirs(_sel, exist_ok=True)
+        try:
+            for _f in _need:
+                _src = os.path.join(media_dir, _f)
+                if os.path.isfile(_src):
+                    shutil.copyfile(_src, os.path.join(_sel, _f))
+            if os.listdir(_sel):
+                try:
+                    import render as _render
+                    for _eng in _render.ENGINES:
+                        try:
+                            if _eng(_sel, png_dir, 1600):
+                                break
+                        except Exception:                     # noqa: BLE001
+                            continue
+                except Exception:                             # noqa: BLE001
+                    pass
+        finally:
+            shutil.rmtree(_sel, ignore_errors=True)
 
     # ---- 4. 公式索引 ----
     def img_of(base):

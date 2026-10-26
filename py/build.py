@@ -48,6 +48,7 @@ import json
 import os
 import re
 import sys
+import imgsize
 from docxfile import force_utf8_stdio
 
 EQ_RE = re.compile(r"\u27e6EQ:([^\u27e7]+)\u27e7")   # ⟦EQ:name⟧
@@ -318,6 +319,153 @@ def _is_bold(struct, i):
     return bool((struct[i] or {}).get("bold"))
 
 
+CAPTION_RE = re.compile(
+    r"^(?:fig(?:ure)?\.?\s*\d|tab(?:le|les)?\.?\s*\d|exhibit\s*\d"
+    r"|scheme\s*\d|eq(?:uation)?\.?\s*\d|图\s*\d|表\s*\d"
+    r"|式\s*\d|公式\s*\d|算法\s*\d|程序\s*\d)", re.I)
+
+
+def _is_caption(t):
+    """题注（图1 / Table 2 / 式(3)…）不是标题：它标注的是旁边的图/表/公式，
+    升进目录会让目录里混一堆"Figure 1. xxx"。英文论文与中文论文都有这个
+    形态——而且题注惯例恰好就是居中加粗，与"居中标签"撞形。"""
+    return bool(CAPTION_RE.match(t or ""))
+
+
+def _para_jc(struct, i):
+    """段落对齐（"center" / "right" / "both"）。左对齐与缺省都是 None。"""
+    if not struct or i >= len(struct):
+        return None
+    return (struct[i] or {}).get("jc") or None
+
+
+def _para_color(struct, i):
+    """段落字体颜色（RRGGBB）。黑（000000）与 auto 都不算。"""
+    if not struct or i >= len(struct):
+        return None
+    return (struct[i] or {}).get("color") or None
+
+
+def _para_indent_chars(struct, i):
+    """首行缩进折算成「几个字」。0 = 不缩进。
+
+    Word 给两种口径，优先用 firstLineChars（它直接就是"几个字"的 100 倍，
+    与字号无关，任何文档都成立）：
+      firstLineChars=200 → 2 字；firstLineChars=50 → 0 字（那 0.5 字其实是
+      编号悬挂，缩进量属于编号，不该复制成正文缩进）。
+    段落只写了 firstLine（twip，绝对长度）时，必须除以**这篇文档自己的**
+    全角字宽才能换算成字数——字宽由 extract 记在 charTwip 里（从
+    docDefaults/Normal 的字号推得，见 docstyle.default_char_twip）。
+    写死 210（10.5pt 的字宽）是文档特化：12pt 文档上 2 字缩进会被算成
+    1.75 字而整个丢掉，16pt 文档上会被算成 3 字。charTwip 缺失（旧产物）
+    才退回 210。
+
+    上限 4：正文缩进超过 4 字基本都是排版事故或悬挂缩进，照抄会把段落顶
+    到页面中间去。
+    """
+    if not struct or i >= len(struct):
+        return 0
+    rec = struct[i] or {}
+    try:
+        flc = int(rec.get("firstLineChars") or 0)
+    except (TypeError, ValueError):
+        flc = 0
+    if flc > 0:
+        n = flc // 100
+    else:
+        try:
+            fl = int(rec.get("firstLine") or 0)
+        except (TypeError, ValueError):
+            fl = 0
+        try:
+            cw = int(rec.get("charTwip") or 0)
+        except (TypeError, ValueError):
+            cw = 0
+        n = fl // (cw if cw > 0 else 210)
+    return max(0, min(n, 4))
+
+
+def _align_attr(jc):
+    """w:jc → HTML align 值。center/right 才有意义；both(两端对齐)/左对齐
+    是渲染器默认，写成 align="both" 是非法值，等于没写。"""
+    return jc if jc in ("center", "right") else None
+
+
+def wrap_para_format(text, jc=None, color=None, indent=0):
+    """把「居中 / 非黑颜色 / 首行缩进」三项排版信号落成 Markdown 里的 HTML。
+
+    这三样在纯 Markdown 里都没有对应语法：
+      * 居中——Markdown 无居中语法，只能借 <p align="center">；
+      * 颜色——同上，只能借 <span style="color:...">；
+      * 首行缩进——行首空白会被 Markdown 解析器整段吃掉，只能借全角空格
+        （U+3000）顶出来，它在任何渲染器里都是实打实的两个字符宽的空白。
+
+    不还原的后果是「静默丢格式」：正文一字不差，但原文的层级提示（居中 +
+    蓝色表示这是小节标题）与段落起始（首行缩进两格）全没了，正是用户报的
+    三类问题里的两类。
+    """
+    if not text:
+        return text
+    body = text
+    # 首行缩进：只在没有更强信号时补。居中/着色的段落通常是标题性文字，
+    # 再补两个全角空格只会让居中看起来偏了。
+    if indent and not jc and not color:
+        body = "\u3000" * indent + body.lstrip()
+    if color:
+        # 行内已有的加粗标记要留在 span 外面，否则 ** 与 HTML 混排时部分
+        # 渲染器不闭合。这里只包一层颜色，不动原有标记。
+        body = '<span style="color:#%s">%s</span>' % (color, body)
+    if _align_attr(jc):
+        body = '<p align="%s">%s</p>' % (jc, body)
+    # Markdown 的 **加粗** 在 HTML 块级标签里不再被当作行内 Markdown 解析
+    # （<p align="center">**标题**</p> 会原样显示两个星号）。只要套了 HTML，
+    # 就把 **…** 换成形如 <strong>…</strong> 的标签——任何渲染器都认。
+    if color or _align_attr(jc):
+        body = _md_bold_to_html(body)
+    return body
+
+
+def _md_bold_to_html(s):
+    """把 **加粗** 换成 <strong>…</strong>（HTML 里 ** 不再被解析）。
+
+    只处理成对出现的 **，单个落单的 ** 原样保留（那多半是普通星号）。
+    """
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+
+
+def regroup_rows(tex, nrows):
+    """把被并成一行的多行公式拆回多行（aligned 环境）。
+
+    Word 里一个公式对象常常是好几行推导（三行最常见），转写的人却用
+    `\\quad` 连成一整行——六条铁律全过、渲染也正常，但读者少看两个推导
+    步骤。check_media_rows 拿预览图像素估算出真行数，这里负责动手拆。
+
+    切分行、拼环境两件事都在 validate.py 里（split_formula_rows /
+    join_formula_rows），与校验器共用同一套规则——否则会出现「build 说已
+    修好、validate 仍报错」的打架局面：两边对同一个公式的行数理解不同。
+
+    分隔符太多（一段长式里嵌了好几个 \\quad）时按 nrows 均分，而不是硬
+    塞 nrows-1 个切点——那样最后一行会长得离谱。切不出至少两行就返回
+    None，让调用方保留原文：宁可少拆一个，也不要给出一个只有一行的
+    aligned 环境。
+    """
+    if not tex or nrows < 2:
+        return None
+    try:
+        from validate import split_formula_rows, join_formula_rows
+    except ImportError:
+        return None
+    parts = split_formula_rows(tex)
+    if len(parts) < 2:
+        return None
+    if len(parts) > nrows:
+        grouped, per = [], (len(parts) + nrows - 1) // nrows
+        for k in range(0, len(parts), per):
+            grouped.append(", ".join(parts[k:k + per]))
+        parts = grouped
+    return join_formula_rows(parts)
+
+
 def guess_headings(paras, struct=None, bold_headings=False):
     """生成标题建议 {索引: 级别}。保守但覆盖常见中文排版。
 
@@ -337,6 +485,9 @@ def guess_headings(paras, struct=None, bold_headings=False):
     所以加粗单独出现时要求更严：短、无句末标点、后面紧跟正文。
     """
     out = {}
+    # 走过「居中+加粗」这条规则的段落索引。用来让**相邻的一组**居中标签
+    # 保持同一层级（见下面那条规则里的说明），而不是一条比一条深。
+    center_label = set()
     for i, raw in enumerate(paras):
         # 行首的插图占位先剥掉再判标题：段落常把「图 + 标题文字」放在一起
         # （`⟦EQ:fig:image135.emf⟧两组相反Burgers矢量…`）。占位符本身含
@@ -375,6 +526,33 @@ def guess_headings(paras, struct=None, bold_headings=False):
 
         if t in BARE_HEADINGS:
             out[i] = 2
+            continue
+
+        # 居中 + 整段加粗 = Word 里的小节标签（实测本文档 6 条蓝色居中标题
+        # 全是这个形态）。不加这条的话，它们只能走下面的加粗兜底，而兜底
+        # 要求「≤15 字」且「下一段是正文」——"一般线弹性介质中…公式"19 字、
+        # "一般位错密度演化方程"后面紧跟公式，全被挡掉，退化成普通段落；
+        # 偏偏 13 字的"各向同性情况下物理场表达式"过了兜底成了标题。同一
+        # 类标签两种下场，用户在渲染稿里看到的就是"有的居中有的不居中、
+        # 有的多一行空行"。居中本身就是强结构信号，不需要旁证。
+        #
+        # 两个防误伤的限定（合成语料探针实测出来的）：
+        #   * 图/表题注不是标题：英文论文里 "Figure 1. xxx" / "Table 1. xxx"
+        #     就是居中加粗的，套这条规则会把题注升进目录。题注一律以
+        #     Figure/Fig./Table/图N/表N/式N 这类词开头，挡掉。
+        #   * 同级不递增：一组相邻居的标签（上面 6 条蓝标题就是）层级必须
+        #     一致。若最近的上一条标题本身就是居中标签，这一条与它同级，
+        #     而不是 _deepest_before+1——否则一过三条标签就一路掉到 h6。
+        if _para_jc(struct, i) == "center" and _is_bold(struct, i) \
+                and not re.search(r"[。；]$", t) \
+                and not _is_caption(t):
+            prev = [k for k in out if k < i]
+            if prev and prev[-1] in center_label:
+                # 上一条标题也是居中标签 → 同一组，层级照抄，不递增
+                out[i] = out[prev[-1]]
+            else:
+                out[i] = min(_deepest_before(out, i) + 1, 6)
+            center_label.add(i)
             continue
 
         # 1． / 1. / 2.3 / 2.3.1
@@ -430,6 +608,7 @@ def guess_headings(paras, struct=None, bold_headings=False):
         # 目录深度，猜错「是不是标题」会把正文变成标题——后者代价大得多。
         if bold_headings and _is_bold(struct, i) and len(t) <= 15 \
                 and not re.search(r"[。；：，,:.！？、）)】]$", t) \
+                and not _is_caption(t) \
                 and _next_is_prose(paras, i):
             out[i] = min(_deepest_before(out, i) + 1, 6)
             continue
@@ -482,6 +661,42 @@ def main():
     if not isinstance(latex, dict):
         sys.stderr.write("build 输入错误: LaTeX 表应为 JSON 对象（公式名 → LaTeX 字符串）\n")
         sys.exit(3)
+
+    # 画布内的公式已经画进流程图 PNG，它的尺寸是整张画布的形状，
+    # 不是公式行数——参与标定会把每行像素拉到荒谬的量级。
+    index_scan = [e for e in index if isinstance(e, dict)
+                  and not e.get("in_canvas")]
+    sizes = {}
+    media = os.path.join(args.workdir, "media")
+    if os.path.isdir(media):
+        for name in os.listdir(media):
+            p = os.path.join(media, name)
+            if not os.path.isfile(p):
+                continue
+            try:
+                with open(p, "rb") as fp:
+                    sizes[name] = imgsize.read_size(fp.read())
+            except Exception:
+                continue
+    row_hits = {}
+    try:
+        from validate import check_media_rows
+        _hits, _px = check_media_rows(index_scan, sizes, latex)
+        row_hits = {h[0]: h[3] for h in _hits}
+    except Exception:
+        row_hits = {}
+    # 预览图是多行、转写却成一行的公式：趁还在 latex 表里就把它拆回去。
+    # 放在这里（而不是输出时）改，是为了让下游所有路径——行内、display、
+    # 混排——都拿到已经修好的那一份，不必各自重拆一遍。
+    # n_regrouped 先攒着：stats 在这一段之后才建。
+    n_regrouped = 0
+    for name in list(row_hits):
+        regrouped = regroup_rows(latex.get(name), row_hits[name])
+        if regrouped and regrouped != latex.get(name):
+            latex[name] = regrouped
+            n_regrouped += 1
+        else:
+            row_hits.pop(name, None)
 
     # ---- 标题 ----
     struct = load_json(os.path.join(args.workdir, "docstruct.json"))
@@ -575,7 +790,9 @@ def main():
              "orphan_punct_dropped": 0,  # 公式块后无处安放的孤立标点
              "tables": 0,               # 正文里还原出的表格数
              "table_rows": 0,           # 表格的数据行数（不含表头）
-             "lists": 0}                # 识别出的列表项数
+             "lists": 0,                # 识别出的列表项数
+             # 预览图是多行、转写却是一行的公式：已自动拆成多行。
+             "formulas_row_regrouped": n_regrouped}
 
     prev_display = False
     all_notes = []          # 脚注正文，文末统一列出
@@ -696,7 +913,22 @@ def main():
             continue
         stats["paragraphs"] += 1
 
+        # ---- 排版信号：居中 / 颜色 / 首行缩进 ----
+        # 这三样在 Markdown 里都没有原生语法，不还原就是静默丢格式：正文
+        # 一字不差，但原文的层级提示（居中+蓝色 = 小节标题）与段落起始
+        # （首行缩进两格）全没了。
+        jc = _para_jc(struct, i)
+        color = _para_color(struct, i)
+        # 标题不加首行缩进：它的 w:ind 是 Word 编号悬挂，不是正文缩进；
+        # 列表项加了缩进会让 Markdown 认不出列表。
+        indent = 0 if (headings.get(i, 0) or lk) else _para_indent_chars(struct, i)
+
         # ---- 标题 ----
+        # 居中的标题不能用 `#`：Markdown 的标题语法没有居中，走了 `#` 分支
+        # 居中就丢了（实测文档大标题就是这样丢的——它的居中来自 Title 样式
+        # 的 `<w:jc w:val="center"/>`，段落自己没写）。改用 `<hN align>`：
+        # 既是标题（渲染器给出标题的字号与上下间距，不会在正文里凭空多出
+        # 一行空白），又保住了居中。
         level = headings.get(i, 0)
         if level:
             stats["headings"] += 1
@@ -709,10 +941,24 @@ def main():
                     out.append("![图](%s)" % ref)
                     out.append("")
                     stats["figures"] += 1
-            out.append("#" * min(int(level), 6) + " " + _heading_text(i, text, struct))
+            htext = _heading_text(i, text, struct)
+            if color:
+                htext = '<span style="color:#%s">%s</span>' % (color, htext)
+            if _align_attr(jc):
+                out.append('<h%d align="%s">%s</h%d>'
+                           % (min(int(level), 6), jc, htext, min(int(level), 6)))
+            else:
+                out.append("#" * min(int(level), 6) + " " + htext)
             out.append("")
             prev_display = False
             continue
+
+        # 含公式/插图的段落不整体包 HTML：混排路径会把这一段拆成多行输出，
+        # 包在首尾的 <p> 会跨行裂开，渲染出半个标签。这类段落里的公式本身
+        # （$$ 块、独立成行的图）已经是居中呈现的，丢了字符居中不影响可读性。
+        if (jc or color) and not EQ_RE.search(text):
+            text = wrap_para_format(text, jc=jc, color=color)
+            raw = wrap_para_format(raw, jc=jc, color=color)
 
         # ---- 列表 ----
         # Word 的列表项在正文里只是普通段落，形状由 numbering.xml 决定。
@@ -788,7 +1034,12 @@ def main():
             continue
 
         # ---- 混排：拼回一句话，逐个判断 ----
+        # line_formula_flushed: 这一段里已有的文字是否作为**独立行**输出过
+        # （被长公式或插图劈开）。一旦发生过，"rest" 只是原段落的最后一句，
+        # 再给它加首行缩进就会让它看起来比同段的其它行更靠右——读者会以
+        # 为那是新段落。
         line = []
+        line_formula_flushed = False
         pending = []     # 公式之后的标点残片，等下粘到末尾
         for kind, val in pieces:
             if kind == "text":
@@ -810,6 +1061,7 @@ def main():
                     out.append(_boundary_after_formula(head))
                     out.append("")
                     line = []
+                    line_formula_flushed = True
                 out.append(val)
                 out.append("")
                 prev_display = False
@@ -830,6 +1082,7 @@ def main():
                         out.append(_boundary_after_formula(head))
                         out.append("")
                         line = []
+                        line_formula_flushed = True
                     stats["formulas_display"] += 1
                     push_display(tex)
                 else:
@@ -871,6 +1124,11 @@ def main():
         # 公式后紧跟中文时同样要补边界，否则渲染器不认定界结束。
         rest = _boundary_after_formula(rest)
         if rest:
+            # 首行缩进在这里补，不能提前：混排路径输出的每一步都 strip()，
+            # 提前加的全角空格会被当成普通空白吃掉。放在最后 append 之前
+            # 才保得住。
+            if indent and not line_formula_flushed:
+                rest = "\u3000" * indent + rest.lstrip()
             out.append(rest)
             out.append("")
             prev_display = False
@@ -885,7 +1143,10 @@ def main():
         stats["footnotes"] = len(all_notes)
 
     body = "\n".join(out)
-    body = re.sub(r"\n{3,}", "\n\n", body).strip() + "\n"
+    body = re.sub(r"\n{3,}", "\n\n", body).strip("\n") + "\n"
+    # 注意是 strip("\n") 不是 strip()：Python 的 str.strip() 把 U+3000 也算
+    # 空白，一篇**以缩进正文开头**的文档（没有大标题打头）会在最后这一步
+    # 被削掉首段的全角空格——16pt 合成文档的端到端测试实测撞上了这个。
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:

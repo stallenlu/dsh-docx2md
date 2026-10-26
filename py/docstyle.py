@@ -134,6 +134,86 @@ def read_styles(z):
     return out
 
 
+def default_char_twip(z):
+    """文档默认字号下的全角字宽（twip）。取不到时退回 210（10.5pt 中文）。
+
+    为什么不能写死 210：`w:ind w:firstLine` 是绝对长度（twip），换算成
+    「几个字」必须除以**这篇文档自己的**字宽。实测本文档 Normal 样式
+    `<w:sz w:val="21"/>`（半磅）= 10.5pt，全角字宽 = 10.5 × 20 = 210twip；
+    同一份文档里 56 个同时写了 firstLine 与 firstLineChars 的段落反推
+    出的字宽正是 210/240——写死 210 在 12pt 文档上就会把 2 字缩进算成
+    1.75 字、在 16pt 上算成 3 字。
+
+    查找顺序：docDefaults/rPrDefault/rPr/sz → Normal 样式的 sz → 21。
+    """
+    root = _parse(z, "word/styles.xml")
+    if root is None:
+        return 210
+    sz = None
+    dd = root.find(W + "docDefaults")
+    if dd is not None:
+        el = dd.find(W + "rPrDefault/" + W + "rPr/" + W + "sz")
+        if el is not None:
+            sz = el.get(W + "val")
+    if sz is None:
+        for st in root.iter(W + "style"):
+            nm = st.find(W + "name")
+            if nm is not None and (nm.get(W + "val") or "").strip().lower() in ("normal", "默认段落字体"):
+                el = st.find(W + "rPr/" + W + "sz")
+                if el is not None:
+                    sz = el.get(W + "val")
+                break
+    try:
+        half_pt = int(sz)
+    except (TypeError, ValueError):
+        return 210
+    if half_pt < 1:
+        return 210
+    # 半磅 → 磅(÷2) → twip(×20)；全角字宽 = 1em = 字号
+    return half_pt * 10
+
+
+def read_style_jc(z):
+    """styleId → 段落对齐（沿 basedOn 链继承）。只收非默认的 center/right。
+
+    为什么必须查样式链：Word 里「对齐」经常写在样式上而不是段落上。实测
+    本文档的标题段（"基于矢量位错密度的位错动力学及其数理方案"）段落
+    pPr 里根本没有 <w:jc>，居中来自 Title 样式（styleId=7）的
+    `<w:pPr><w:jc w:val="center"/>`。只读段落级 w:jc，标题就丢了居中。
+    """
+    root = _parse(z, "word/styles.xml")
+    if root is None:
+        return {}
+    raw, based = {}, {}
+    for st in root.iter(W + "style"):
+        if st.get(W + "type") not in (None, "paragraph"):
+            continue
+        sid = st.get(W + "styleId")
+        if not sid:
+            continue
+        ppr = st.find(W + "pPr")
+        jc_el = ppr.find(W + "jc") if ppr is not None else None
+        val = jc_el.get(W + "val") if jc_el is not None else None
+        # 只认 center/right：both(两端对齐)/left 是排版默认，既写不进
+        # HTML 的 align（align="both" 是非法值），也不影响读者看到的层级。
+        if val in ("center", "right"):
+            raw[sid] = val
+        b = st.find(W + "basedOn")
+        if b is not None:
+            based[sid] = b.get(W + "val")
+
+    def resolve(sid, depth=0):
+        if sid in raw:
+            return raw[sid]
+        if depth > 10:                       # 样式链成环的保险
+            return None
+        parent = based.get(sid)
+        return resolve(parent, depth + 1) if parent else None
+
+    return {sid: resolve(sid)
+            for sid in set(list(raw) + list(based)) if resolve(sid)}
+
+
 def read_numbering(z):
     """numId → {ilvl: (numFmt, lvlText, start)}。"""
     out = {}
@@ -197,21 +277,62 @@ def paragraph_marks(z, paras_elems):
     与 paras.json 同序、同口径的那一组元素。
 
     返回与 paras_elems 同长的列表，每项：
-        {"style": int|None, "marker": str, "bold": bool}
-    """
+        {"style": int|None, "marker": str, "bold": bool,
+         "jc": str|None, "color": str|None,
+         "firstLine": int|None, "firstLineChars": int|None,
+         "charTwip": int}
+
+    后五项是**排版**信号，不是结构信号，但同样是原文里明确记录的东西：
+      * jc / color: Word 里居中且非黑色的段（"一般位错密度演化方程"）在纯
+        Markdown 里没有任何对应语法，不读它们，这段就退化成普通一行。
+      * firstLine: 首行缩进（中文正文缩进两字符 = 2 个字宽）。Markdown
+        解析器会把行首空白整段吃掉，不还原就彻底消失。
+      * charTwip: 本文档默认字号的全角字宽，firstLine 换算成「几个字」
+        要除以它（见 default_char_twip）。
+      """
     styles = read_styles(z)
+    style_jc = read_style_jc(z)
     numbering = read_numbering(z)
+    char_twip = default_char_twip(z)
     counters = {}
     out = []
     for p in paras_elems:
         style = None
         marker = ""
         bold = False
+        jc = None
+        first_line = None
+        first_line_chars = None
         ppr = p.find(W + "pPr")
         if ppr is not None:
             ps = ppr.find(W + "pStyle")
             if ps is not None:
                 style = styles.get(ps.get(W + "val"))
+                # 段落自己没写 w:jc 时，用样式链上的（Title 样式的居中就
+                # 是这么来的；段落级覆盖样式级）。
+                jc = style_jc.get(ps.get(W + "val"))
+            jc_el = ppr.find(W + "jc")
+            if jc_el is not None:
+                cand = jc_el.get(W + "val")
+                if cand in ("center", "right"):
+                    jc = cand
+                elif cand in ("left", "start", "both", "justify",
+                              "distribute"):
+                    jc = None               # 段落显式默认对齐，覆盖样式
+            ind = ppr.find(W + "ind")
+            if ind is not None:
+                cand = ind.get(W + "firstLine")
+                if cand:
+                    try:
+                        first_line = int(cand)
+                    except ValueError:
+                        pass
+                cand = ind.get(W + "firstLineChars")
+                if cand:
+                    try:
+                        first_line_chars = int(cand)
+                    except ValueError:
+                        pass
             npr = ppr.find(W + "numPr")
             if npr is not None:
                 n_el = npr.find(W + "numId")
@@ -246,7 +367,29 @@ def paragraph_marks(z, paras_elems):
                     flags.append(b is not None
                                  and b.get(W + "val") not in ("0", "false"))
                 bold = bool(flags) and all(flags)
-        out.append({"style": style, "marker": marker, "bold": bold})
+        color = None
+        rprs = [rpr] if rpr is not None else []
+        rprs += [r.find(W + "rPr") for r in p.iter(W + "r")]
+        for rp in rprs:
+            if rp is None:
+                continue
+            c = rp.find(W + "color")
+            if c is None:
+                continue
+            val = c.get(W + "val")
+            if val and val.upper() not in ("000000", "AUTO"):
+                # 蓝色标题（"一般位错密度演化方程" 0000FF）在纯 Markdown 里
+                # 没有任何语法能表达，不读它，颜色就静默消失。
+                color = val.upper()
+                break
+        out.append({"style": style, "marker": marker, "bold": bold,
+                    "jc": jc, "color": color,
+                    "firstLine": first_line,
+                    "firstLineChars": first_line_chars,
+                    # 每条都带上：docstruct.json 是「与段落同序的列表」，
+                    # 多一个顶层对象会让所有按下标取记录的调用方都要改。
+                    # 值全相同，293 条多几 KB，换 build 端零改动。
+                    "charTwip": char_twip})
     return out
 
 

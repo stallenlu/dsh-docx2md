@@ -45,6 +45,7 @@ const EXPECTED = new Set([
   'LICENSE',
   'README.md',
   'cordis.patch.yml',
+  'icon.svg',
   'lib/index.js',
   'lib/toolkit.js',
   'package.json',

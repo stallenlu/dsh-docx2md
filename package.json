@@ -19,6 +19,7 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "main": "lib/index.js",
+  "icon": "icon.svg",
   "exports": {
     ".": {
       "default": "./lib/index.js"
@@ -31,6 +32,7 @@
     "py/*.py",
     "skills",
     "cordis.patch.yml",
+    "icon.svg",
     "README.md",
     "LICENSE"
   ],

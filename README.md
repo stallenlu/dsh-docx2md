@@ -598,8 +598,8 @@ node test/pack.mjs                    # 打包内容
 而且 `.npmignore` 在 `files` 白名单模式下对已纳入的目录**不生效**——这一条与
 直觉相反，是实测结论。改成 `py/*.py` 才真正排除，包体积从 121.9 kB 降到 107.1 kB。
 
-当前包的 15 个文件：`LICENSE`、`README.md`、`cordis.patch.yml`、`package.json`、
-`lib/index.js`、`lib/toolkit.js`、`py/*.py`（8 个）、`skills/docx2md/SKILL.md`。
+当前包的 20 个文件：`LICENSE`、`README.md`、`cordis.patch.yml`、`package.json`、
+`icon.svg`、`lib/index.js`、`lib/toolkit.js`、`py/*.py`（12 个）、`skills/docx2md/SKILL.md`。
 
 ### 从 tarball 安装这条路径
 

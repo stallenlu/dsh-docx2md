@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7EA0FF"/>
+      <stop offset="1" stop-color="#C07BFF"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(-4 0)">
+    <path d="M32 12 H76 L98 34 V106 A10 10 0 0 1 88 116 H32 A10 10 0 0 1 22 106 V22 A10 10 0 0 1 32 12 Z" stroke="#7885A8" stroke-width="4.5" stroke-linejoin="round"/>
+    <path d="M76 12 V34 H98" stroke="#7885A8" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <text x="52" y="84" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="52" font-weight="bold" fill="url(#brand)">Σ</text>
+    <circle cx="98" cy="98" r="18" fill="#2BD4A8"/>
+    <path d="M89 98 H106 M100 92 L106 98 L100 104" stroke="#062B24" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

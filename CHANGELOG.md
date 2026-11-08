@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.4
+
+### 文档：README 安装示例改用官方 npm 包
+
+把 `## 安装` 的主路径从 `file:` / `github:` 本地开发示例改为官方 npm 包
+`dsh-docx2md@0.6.4`（另附 `dsh plugin add` 与 GitHub Release tarball 两种备选）；
+「声明的两处」的 dependencies 改为 npm 版本号；`file:` / `github:` 流程完整保留到
+明确标注的「本地开发（从源码安装）」小节（约 700 行的更新 / sync-check 文档仍围绕
+它展开，不能删）；补上 npm 版本的更新与卸载说明。
+
+本版本**无代码改动**，仅同步包内 README —— 使 `npm install dsh-docx2md` 下载到的
+README 与仓库 main 分支一致。
+
 ## 0.6.3
 
 ### 三类排版信号还原 + 两类公式转写缺陷探测器

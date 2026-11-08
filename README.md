@@ -50,18 +50,23 @@ WPS / Word 的私有二进制格式（MTEF），解出来必然失真。
 
 DSH 的 profile 用 **pnpm** 管理，`node_modules` 是 pnpm 管的（`nodeLinker: hoisted`）。
 **不要手工往 `node_modules` 里拷目录**——下次 `pnpm install` 会把没有写进
-lockfile 的目录删掉。走 pnpm 正规安装：
+lockfile 的目录删掉。
+
+本包已发布到 npm（[`dsh-docx2md@0.6.3`](https://www.npmjs.com/package/dsh-docx2md)），
+**日常使用直接装正式版本**，不依赖本地源码：
 
 ```bash
-# 1. 把包放到 profile 外部（file: 依赖不能指向 node_modules 内部，会成自环）
-cp -r dsh-docx2md ~/.dsh/packages/dsh-docx2md
-
-# 2. 在 profile 里用 pnpm 安装（会写进 pnpm-lock.yaml）
 cd ~/.dsh/profiles/desktop
-pnpm add file:~/../packages/dsh-docx2md
+pnpm add dsh-docx2md@0.6.3          # 正式 npm 包（推荐，会写进 pnpm-lock.yaml）
+
+# 或 DSH 安装器一条命令（等价于上面的 pnpm add）
+dsh plugin --profile desktop add dsh-docx2md@0.6.3
+
+# 或装版本固定的 GitHub Release tarball（与 npm 包字节一致，不需要 npm）
+dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releases/download/v0.6.3/dsh-docx2md-0.6.3.tgz
 ```
 
-Windows 上路径要写成 `pnpm add file:C:/Users/<你>/.dsh/packages/dsh-docx2md`。
+升级时把 `@0.6.3` 换成新版本号即可。
 
 ### 声明的两处
 
@@ -69,7 +74,7 @@ Windows 上路径要写成 `pnpm add file:C:/Users/<你>/.dsh/packages/dsh-docx2
 
 ```jsonc
 {
-  "dependencies": { "dsh-docx2md": "file:../../packages/dsh-docx2md" },
+  "dependencies": { "dsh-docx2md": "0.6.3" },
   "dsh": { "profile": { "bundles": [ /* ... */, "dsh-docx2md" ] } }
 }
 ```
@@ -78,6 +83,8 @@ Windows 上路径要写成 `pnpm add file:C:/Users/<你>/.dsh/packages/dsh-docx2
 `dsh.bundle.patch: ./cordis.patch.yml`，DSH 会自动读取它并把插件插入。
 **不要再往 profile 的 `cordis.patch.yml` 里手写 `insert`** —— 那会导致同一插件被
 注册两次。
+
+`dependencies` 里写的是 **npm 版本号**（`pnpm add dsh-docx2md@0.6.3` 会自动写入这一行和 `pnpm-lock.yaml`）；不要再写成 `file:` 路径或 `github:` 地址。
 
 ### 让配置改完立即生效
 
@@ -91,21 +98,46 @@ profile 的 `package.json` 里加上：
 注意：技能列表走另一套机制（`dsh-skill-filesystem` 用 chokidar 监听文件），
 所以可能出现"技能已出现、工具还没出现"的中间状态——这不是 bug，重启即可。
 
-### 从 Git 仓库安装
+### 本地开发（从源码安装）
+
+只有改本插件代码做开发时才需要这一节；日常使用请直接装上面的 npm 正式包。
+
+```bash
+# 1. 把包放到 profile 外部（file: 依赖不能指向 node_modules 内部，会成自环）
+cp -r dsh-docx2md ~/.dsh/packages/dsh-docx2md
+
+# 2. 在 profile 里用 pnpm 安装（会写进 pnpm-lock.yaml）
+cd ~/.dsh/profiles/desktop
+pnpm add file:~/../packages/dsh-docx2md
+```
+
+Windows 上路径要写成 `pnpm add file:C:/Users/<你>/.dsh/packages/dsh-docx2md`。
+也可以直接从 Git 仓库装开发中的版本：
 
 ```bash
 cd ~/.dsh/profiles/desktop
 pnpm add github:<你的账号>/dsh-docx2md
 ```
 
-再把包名加进 `bundles`。本地开发时用 `file:` 装一次，之后改
-`~/.dsh/packages/dsh-docx2md` 里的文件即可——pnpm 建的是**硬链接**，改动
-会立即反映到 `node_modules`（若用编辑器原子写入导致硬链接断开，
-重跑一次 `pnpm install` 即可）。
+再把包名加进 `bundles`。装好之后改 `~/.dsh/packages/dsh-docx2md` 里的文件即可——
+pnpm 建的是**硬链接**，改动会立即反映到 `node_modules`（若用编辑器原子写入导致
+硬链接断开，重跑一次 `pnpm install` 即可）。`file:` / `github:` 这类依赖只用于开发，
+正式环境请用 `dsh-docx2md@0.6.3`。
 
 ---
 
 ### 更新
+
+**从 npm 安装时**，升级就是换版本号（lock 里记的是版本号 + integrity）：
+
+```bash
+cd ~/.dsh/profiles/desktop
+pnpm add dsh-docx2md@<新版本>        # 或 pnpm update dsh-docx2md
+```
+
+改完重启 DSH，跑一次 `docx2md_inspect` 确认行为符合预期。
+
+> 下面「更新 / sync-check」几段只适用于**本地开发（`file:` 依赖）**；从 npm 安装无需这些步骤。
 
 `file:` 依赖在 lock 里记为 `type: directory`（不是版本号），所以 pnpm **不按版本判断
 是否需要更新**——它只是指向那个目录。因此“更新”要分三种情况：
@@ -166,7 +198,7 @@ pnpm remove dsh-docx2md
 ```
 
 然后从 `package.json` 的 `dsh.profile.bundles` 里删掉 `"dsh-docx2md"`，重启 DSH。
-`~/.dsh/packages/dsh-docx2md` 可以留着（下次重装直接用），也可以删掉。
+若曾用 `file:` 本地开发安装，`~/.dsh/packages/dsh-docx2md` 源码副本可留着下次用，也可以删掉；从 npm 安装则没有这个目录。
 
 验证是否干净：`node_modules/dsh-docx2md` 不存在、`pnpm-lock.yaml` 无记录、
 `bundles` 无条目。本仓库 `test/lifecycle.sh` 就是跑这套闭环的。

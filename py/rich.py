@@ -61,12 +61,13 @@ def _rpr_flags(rpr):
 
 
 def read_rels(z, part="word/_rels/document.xml.rels"):
-    """rId → Target（超链接、图片、脚注都靠它）。"""
-    try:
-        raw = z.read(part).decode("utf-8", "replace")
-    except KeyError:
-        return {}
-    return dict(re.findall(r'Id="([^"]+)"[^>]*Target="([^"]+)"', raw))
+    """rId -> Target（超链接、图片、脚注都靠它）。
+
+    统一走 docxfile.read_rels（按 XML 属性读取，不依赖 Id/Target 顺序）；
+    w:hyperlink 的 URL 是 TargetMode="External"，这里保留外链。
+    """
+    from docxfile import read_rels as _base
+    return _base(z, part=part, include_external=True)
 
 
 def read_notes(z):

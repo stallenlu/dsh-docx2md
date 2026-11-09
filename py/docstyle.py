@@ -86,7 +86,24 @@ def _render(lvl_text, num_fmt, n):
 
 
 def _parse(z, part):
+    """按 z 缓存已解析的部件。styles.xml / numbering.xml 在一次转换里
+    被反复读取（read_styles、default_char_twip、read_style_jc、
+    read_numbering，以及 list_kind 对每个列表段落），逐次 z.read +
+    ET.fromstring 是大文档里最明显的无谓开销。"""
     from xml.etree import ElementTree as ET
+    cache = getattr(z, "_docx2md_parse_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            z._docx2md_parse_cache = cache
+        except AttributeError:
+            return _parse_uncached(z, part, ET)
+    if part not in cache:
+        cache[part] = _parse_uncached(z, part, ET)
+    return cache[part]
+
+
+def _parse_uncached(z, part, ET):
     try:
         return ET.fromstring(z.read(part))
     except (KeyError, ET.ParseError):

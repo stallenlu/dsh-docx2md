@@ -150,7 +150,12 @@ def _run(el):
     if not s:
         return ""
     if sty == "p":
-        return "\\text{%s}" % esc_text(s).replace("\\%", "%")
+        # 不要反转义：% 在 LaTeX 里是注释符，会吞掉该行；esc_text 已转义。
+        return "\\text{%s}" % esc_text(s)
+    if sty == "b":
+        return "\\mathbf{%s}" % esc_text(s)
+    if sty == "i":
+        return "\\mathit{%s}" % esc_text(s)
     return esc_text(s)
 
 
@@ -198,7 +203,8 @@ def _d(el):
     end = _val(pr, "endChr") if pr is not None else None
     beg = "(" if beg is None else beg
     end = ")" if end is None else end
-    inner = ",".join(conv(e) for e in el.findall(M + "e"))
+    sep = _val(pr, "sepChr") or ","
+    inner = sep.join(conv(e) for e in el.findall(M + "e"))
     if beg == "." or beg == "":
         beg = "."
     if end == "." or end == "":

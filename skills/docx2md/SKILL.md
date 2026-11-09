@@ -226,7 +226,7 @@ docx2md_build(workDir="work/", latex="latex.json", out="文档.md",
 
 ```
 docx2md_build(workDir="work/", latex="latex.json", out="文档.md",
-              expectFormulas=<inspect 报出的 formulas 值>)
+              expectFormulas=<inspect 报出的 formulas_total 值>)
 ```
 
 `expectFormulas` 会校验公式总数，能抓住"漏了几个公式"这类问题。

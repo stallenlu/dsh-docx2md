@@ -25,6 +25,14 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
+const PY = process.env.DOCX2MD_TEST_PYTHON || 'python3'
+// Windows 上 spawn('npm') 会因 npm.cmd 不可直接执行而 ENOENT/EINVAL；
+// 直接用 node 跑 npm-cli.js，与宿主侧 lib/index.js 的做法一致。
+const NPM_ARGV = process.env.DOCX2MD_TEST_NPM
+  ? [process.env.DOCX2MD_TEST_NPM]
+  : (process.platform === 'win32'
+      ? [process.execPath, join(process.execPath, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js')]
+      : ['npm'])
 
 let pass = 0
 let fail = 0
@@ -86,7 +94,7 @@ try {
   console.log('== A. 打包（npm pack --dry-run --json）==')
   let files
   await rec('npm pack 可执行并返回清单', async () => {
-    const r = await run('npm', ['pack', '--dry-run', '--json'])
+    const r = await run(NPM_ARGV[0], [...NPM_ARGV.slice(1), 'pack', '--dry-run', '--json'])
     assert(r.code === 0, `npm pack 失败: ${r.err.slice(0, 300)}`)
     const data = JSON.parse(r.out)
     files = (data[0]?.files ?? []).map((f) => f.path)
@@ -120,7 +128,7 @@ try {
   console.log('\n== C. 真实打包 + 解包 ==')
   let unpacked = ''
   await rec('npm pack 生成 tarball 并解包', async () => {
-    const r = await run('npm', ['pack', '--pack-destination', work])
+    const r = await run(NPM_ARGV[0], [...NPM_ARGV.slice(1), 'pack', '--pack-destination', work])
     assert(r.code === 0, `打包失败: ${r.err.slice(0, 300)}`)
     const tgz = r.out.trim().split('\n').pop().trim()
     const tar = join(work, tgz)
@@ -168,7 +176,7 @@ console.log(JSON.stringify({
     // 造一个最小 docx，验证 py 目录能自带运行（不依赖源码 sys.path）
     const docx = join(work, 'tiny.docx')
     const py = join(unpacked, 'py')
-    const mk = await run('python3', ['-c', `
+    const mk = await run(PY, ['-c', `
 import zipfile, sys
 p = sys.argv[1]
 doc = '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>测试</w:t></w:r></w:p></w:body></w:document>'
@@ -181,7 +189,7 @@ with zipfile.ZipFile(p, 'w') as z:
 `, docx])
     assert(mk.code === 0, `造样例失败: ${mk.err.slice(0, 200)}`)
 
-    const r = await run('python3', ['docx_scan.py', docx], { cwd: py })
+    const r = await run(PY, ['docx_scan.py', docx], { cwd: py })
     assert(r.code === 0, `docx_scan.py 失败: ${(r.err || r.out).slice(0, 300)}`)
     const j = JSON.parse(r.out)
     assert(j.paragraphs === 1, `段落数 ${j.paragraphs}，应为 1`)

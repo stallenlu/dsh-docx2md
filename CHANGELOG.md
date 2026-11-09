@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.6.5
+
+### 稳定性、正确性与发布自动化（代码审查整改）
+
+把一轮完整代码审查的发现按严重度落地，涉及宿主层、Python 提取/构建链路、
+测试与文档契约、发布基建。**无新增第三方依赖，无新增 `py/` 文件**（tarball
+仍恰好 20 个文件）。
+
+**宿主层（`lib/`）**
+
+- Python 探测改为逐个候选实测：Windows 上先看 `python` 再看 `python3`，
+  并用 `-c` 探针排除 WindowsApps 存根（以前命中存根就永远退化到 uvx）。
+- 依赖集合对齐实际 import：`olefile` 是唯一硬依赖；`pypdf` 是 README/SKILL
+  明示的「预留、当前未使用」，从探针与 `pip install` 提示里移除；`pillow`
+  补进 uvx 注入列表，让无 LibreOffice 机器的 WMF/EMF 兜底渲染真正可用。
+- 超时清理改为整棵进程树（POSIX `detached` + 进程组 SIGKILL / Windows
+  `taskkill /T /F`），不再遗留 soffice、PowerShell、无头 Edge 孤儿进程。
+- 子进程输出加上限（8 MiB）；非法 UTF-8 与输出截断改以 `warnings[]` 随结果
+  回传，不再静默带着损坏的中文继续。`extractJson` 改为逐个配平候选括号，
+  不再被 stdout 尾部告警里的 `]` / `}` 切错。
+- 默认值收敛到单一 `DEFAULT_CONFIG`；文件扩展名改用 `extname(basename(src))`；
+  `cleanup` 加归属校验（须同时有 `paras.json` + `eq_index.json`，且拒绝根目录
+  与家目录）才允许删 `media/` / `png/`；工具参数校验补全递归校验与
+  `additionalProperties: false`。
+
+**Python 链路（`py/`）**
+
+- `read_rels` 统一抽到 `docxfile.py`：按 XML 属性读取 Relationship，不再依赖
+  `Id` 在 `Target` 之前的正则（OOXML 合法的属性反序会让整批关系静默丢失）。
+  `rich.read_rels` 保留 `TargetMode="External"` 外链，超链接不丢。
+- `pair_ole_previews` 统一抽到 `docxfile.py`：`inspect` 与 `extract` 共用同一把
+  尺子（ShapeID 精确配对优先、下标回退标 `ordinal`）。以前 `inspect` 用纯下标，
+  在 145 公式文档里把 10 个公式的预览图配成了程序截图/三维图且不报错；现在
+  两工具口径必然一致，并新增 `formulas_preview_unverified` 计数。
+- `open_docx` 加解压炸弹三闸（单文件 64 MiB / 压缩比 200:1 / 累计 256 MiB），
+  所有早退分支补 `z.close()`；`eq_stream` 的 `OleFileIO` 构造失败也能安全收尾。
+- OMML 转写：`\%` 不再被反转义（裸 `%` 是 LaTeX 注释符会吞行）、读
+  `m:sepChr` 自定义分隔符、支持 `b`/`i` 数学样式。
+- 图片占位去重提升到全流程级；`names` 改 `set`；`styles.xml` / `numbering.xml`
+  按 `z` 缓存解析结果；`blocks.json` 补进 stale 清理表；降级事件写进
+  `summary.warnings` 随 JSON 回传（宿主此前看不到）。
+
+**测试与文档契约**
+
+- `run-all.sh` 补 `set -o pipefail`，修掉「被测脚本 FAIL 被 `tail` 的 0 掩盖」
+  （此前 CI 退出码近乎恒 0）；`python3` / `/tmp` 硬编码改环境变量与
+  `mkdtemp`，Windows 可跑通；`expectFormulas` 三处统一为 `formulas_total`。
+- 新增无条件的工具层端到端 `test/tool-e2e.mjs`（内嵌合成 docx，属性反序
+  rels + External 超链接 + 图片），干净 clone 不再零覆盖。
+- README 补齐 `docx2md_build` 全部 9 个参数、T1–T14 范围、包内绝对链接；
+  SKILL.md 的 `expectFormulas` 口径修正。
+
+**发布基建**
+
+- `prepack`（`test/prepack.mjs`）：静态门禁，所有输出走 stderr（否则污染
+  `npm pack --json`），且绝不调用 `npm pack` 自身（会无限递归）。
+- `publishConfig.provenance: true` + `.github/workflows/publish.yml`
+  （`id-token: write` + `npm publish --provenance`）与 `.github/workflows/ci.yml`
+  （环境无关精选组，避开需渲染引擎的画布 e2e）。
+
 ## 0.6.4
 
 ### 文档：README 安装示例改用官方 npm 包

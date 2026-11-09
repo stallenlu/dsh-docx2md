@@ -35,7 +35,7 @@ import sys
 import zipfile
 from xml.etree import ElementTree as ET
 
-from docxfile import BadDocument, fail, force_utf8_stdio, open_docx
+from docxfile import BadDocument, fail, force_utf8_stdio, open_docx, read_rels, pair_ole_previews
 import imgformula as imgf
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -62,14 +62,16 @@ def mtef_variant(eq):
 
 def eq_stream(raw_bin):
     import olefile
-    ole = olefile.OleFileIO(io.BytesIO(raw_bin))
+    ole = None
     try:
+        ole = olefile.OleFileIO(io.BytesIO(raw_bin))
         for s in ole.listdir():
             if s[-1] == "Equation Native":
                 return ole.openstream("/".join(s)).read()
         return b""
     finally:
-        ole.close()
+        if ole is not None:
+            ole.close()
 
 
 def engines():
@@ -96,7 +98,7 @@ def engines():
 
 def main():
     if len(sys.argv) < 2:
-        print(__doc__)
+        sys.stderr.write((__doc__ or "") + "\n")
         sys.exit(2)
     src = sys.argv[1]
 
@@ -106,11 +108,7 @@ def main():
         fail(str(exc))
     names = z.namelist()
 
-    rels_path = "word/_rels/document.xml.rels"
-    rel_map = {}
-    if rels_path in names:
-        rels = z.read(rels_path).decode("utf-8", "replace")
-        rel_map = dict(re.findall(r'Id="([^"]+)"[^>]*Target="([^"]+)"', rels))
+    rel_map = read_rels(z)
 
     body = root.find(W + "body")
 
@@ -142,22 +140,19 @@ def main():
     # 都能遍历到同一个 o:OLEObject，逐段相加会把它数两遍。口径要与
     # extract.py 一致（那边用 outermost_p 判归属），否则 inspect 报 4
     # 个公式、extract 产出 2 个占位符，调用方会以为丢了公式。
-    pairs = {}
+    # 与 extract 共用同一套配对规则（ShapeID 优先，回退标 unverified）。
+    # 以前这里按「同段第 k 个 OLEObject ↔ 第 k 张 v:imagedata」下标配对，
+    # 与 extract 的 ShapeID 口径不一致：段落里公式前夹一张插图就会配错
+    # 预览图，而且 inspect 不报错。统一后两工具口径必然一致。
+    pairs, pairing, _ole_shape_id = pair_ole_previews(body, rel_map, W, R, V, O)
     n_eq = 0
     seen_ole = set()
     for p in body.iter(W + "p"):
-        imgs = [i.get(R + "id") for i in p.iter(V + "imagedata")]
-        objs = list(p.iter(O + "OLEObject"))
-        for k, obj in enumerate(objs):
+        for obj in p.iter(O + "OLEObject"):
             if id(obj) in seen_ole:
                 continue
             seen_ole.add(id(obj))
             n_eq += 1
-            oid = (rel_map.get(obj.get(R + "id")) or "?").split("/")[-1]
-            if k < len(imgs):
-                pairs[oid] = rel_map.get(imgs[k]) or None
-            else:
-                pairs[oid] = None
 
     # Word 原生公式（OMML）：新版 Word 的默认格式，结构化 XML，
     # extract 阶段可确定性转成 LaTeX，不需要读图。inspect 必须报出来，
@@ -289,6 +284,8 @@ def main():
         "variants": variants,
         "formulas_with_preview": with_preview,
         "formulas_without_preview": without,
+        "formulas_preview_unverified": sum(
+            1 for v in pairing.values() if v == "ordinal"),
         "media_formats": media_formats,
         "has_ole_objects": n_eq > 0,
         "has_omml": n_omml > 0,

@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
 const PY_DIR = join(ROOT, 'py')
+const PY = process.env.DOCX2MD_TEST_PYTHON || 'python3'
 const DOC = process.argv[2]
 
 let pass = 0
@@ -39,7 +40,7 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg) }
 
 function runPy(script, args) {
   return new Promise((done) => {
-    const c = spawn('python3', [join(PY_DIR, script), ...args], {
+    const c = spawn(PY, [join(PY_DIR, script), ...args], {
       cwd: PY_DIR,
       env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
       stdio: ['ignore', 'pipe', 'pipe'],

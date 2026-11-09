@@ -7,7 +7,10 @@
 #
 # 为什么打包检查默认不跑：它要调 npm pack（网络无关但较慢），且只在发布前有意义。
 # 退出码 0 = 全绿。
-set -u
+set -uo pipefail
+# 跨平台：允许用 DOCX2MD_TEST_PYTHON 指定解释器（Windows 的 python3 多是存根）。
+PY="${DOCX2MD_TEST_PYTHON:-python3}"
+export DOCX2MD_TEST_PYTHON="$PY"
 cd "$(dirname "$0")/.." || exit 1
 WITH_PACK=0
 if [ "${1:-}" = "--with-pack" ]; then
@@ -21,7 +24,7 @@ note() { if [ $1 -ne 0 ]; then fail=$((fail+1)); printf '  >>> FAILED\n'; else p
 
 step "1. Python 语法"
 for f in py/*.py; do
-  python3 -c "import ast,sys; ast.parse(open('$f',encoding='utf-8').read())" || { echo "  BAD $f"; fail=$((fail+1)); }
+  "$PY" -c "import ast,sys; ast.parse(open('$f',encoding='utf-8').read())" || { echo "  BAD $f"; fail=$((fail+1)); }
 done
 echo "  全部通过"; note 0
 
@@ -33,7 +36,7 @@ echo "  全部通过"
 note 0; note 0
 
 step "3. Python 模块名不与标准库冲突"
-python3 - <<'PY'
+"$PY" - <<'PY'
 import os, sys
 bad = [f for f in os.listdir('py') if f.endswith('.py') and f[:-3] in sys.stdlib_module_names]
 if bad:
@@ -43,8 +46,8 @@ PY
 note $?
 
 step "4. 同目录直跑（插件的真实调用方式）"
-( cd py && python3 docx_scan.py >/dev/null 2>&1; [ $? -eq 2 ] ) && echo "  docx_scan.py 可启动" || { echo "  docx_scan.py 启动失败"; fail=$((fail+1)); }
-( cd py && python3 validate.py >/dev/null 2>&1; [ $? -eq 2 ] ) && echo "  validate.py 可启动" || { echo "  validate.py 启动失败"; fail=$((fail+1)); }
+( cd py && "$PY" docx_scan.py >/dev/null 2>&1; [ $? -eq 2 ] ) && echo "  docx_scan.py 可启动" || { echo "  docx_scan.py 启动失败"; fail=$((fail+1)); }
+( cd py && "$PY" validate.py >/dev/null 2>&1; [ $? -eq 2 ] ) && echo "  validate.py 可启动" || { echo "  validate.py 启动失败"; fail=$((fail+1)); }
 note 0
 
 step "5. tool 契约（按 dsh-tools 真实校验复刻）"
@@ -56,70 +59,74 @@ node test/skill-contract.mjs | tail -3
 note $?
 
 step "7. 校验器自测（T0–T11 每条规则都有反例）"
-python3 test/validate_selftest.py | tail -3
+"$PY" test/validate_selftest.py | tail -3
 note $?
 
 step "7b. 公式↔预览图配对（ShapeID 优先，回退必告警）"
-python3 test/pairing_selftest.py | tail -2
+"$PY" test/pairing_selftest.py | tail -2
 note $?
 
 step "7c. 公式可显示性（定界/边界/长度，覆盖「显示成源码」那类反馈）"
 if [ -n "$DOC" ] && [ -f "$DOC" ] && [ -f /tmp/latex_by_stream.json ]; then
-  python3 test/display_selftest.py "$DOC" /tmp/latex_by_stream.json | tail -2
+  "$PY" test/display_selftest.py "$DOC" /tmp/latex_by_stream.json | tail -2
 else
-  python3 test/display_selftest.py | tail -2
+  "$PY" test/display_selftest.py | tail -2
 fi
 note $?
 
 step "7d. OMML→LaTeX 转换器（Word 原生公式，22 类结构）"
-python3 test/omml_selftest.py | tail -2
+"$PY" test/omml_selftest.py | tail -2
 note $?
 
 step "7e. OMML 端到端（合成 docx：inspect→extract→build，空 latex 表也要出公式）"
-python3 test/omml_e2e.py | tail -2
+"$PY" test/omml_e2e.py | tail -2
 note $?
 
 step "7f. 图片公式端到端（占位不静默丢 / 可见引用 / 转写替换 / T11 断链）"
-python3 test/image_formula_e2e.py | tail -2
+"$PY" test/image_formula_e2e.py | tail -2
 note $?
 
 step "7g. 画布内公式（w:pict 装公式，不能被当成预览图整棵跳过）"
-python3 test/pict_ole_e2e.py | tail -2
+"$PY" test/pict_ole_e2e.py | tail -2
 note $?
 
 step "7h. 标题结构信号（样式级别 / Word 自动编号 / 整段加粗）"
-python3 test/docstruct_e2e.py | tail -2
+"$PY" test/docstruct_e2e.py | tail -2
 note $?
 
 step "7i. 通用 docx 结构（表格/列表/行内格式/超链接/脚注/合并单元格）"
-python3 test/generic_struct_e2e.py | tail -2
+"$PY" test/generic_struct_e2e.py | tail -2
 note $?
 
 step "7j. 流程图画布（v:group 整块渲染、画布内公式不重复占位）"
-python3 test/canvas_e2e.py | tail -2
+"$PY" test/canvas_e2e.py | tail -2
 note $?
 
 step "7k. 三项排版信号（居中 / 颜色 / 首行缩进）"
-python3 test/parafmt_e2e.py | tail -2
+"$PY" test/parafmt_e2e.py | tail -2
 note $?
 
 step "7l. 探测器通用性（T13/T14 阈值随文档缩放自标定）"
-python3 test/detector_portability.py | tail -2
+"$PY" test/detector_portability.py | tail -2
 note $?
 
 step "8. 边界输入"
 tmp=$(mktemp -d)
 printf 'not a zip' > "$tmp/fake.docx"
-python3 -c "import zipfile;zipfile.ZipFile('$tmp/empty.docx','w').close()"
-python3 -c "import zipfile;z=zipfile.ZipFile('$tmp/nodoc.docx','w');z.writestr('a.txt','x');z.close()"
+"$PY" -c "import zipfile;zipfile.ZipFile('$tmp/empty.docx','w').close()"
+"$PY" -c "import zipfile;z=zipfile.ZipFile('$tmp/nodoc.docx','w');z.writestr('a.txt','x');z.close()"
 ok=1
 for f in fake empty nodoc missing; do
-  ( cd py && python3 docx_scan.py "$tmp/$f.docx" >/dev/null 2>&1 )
+  ( cd py && "$PY" docx_scan.py "$tmp/$f.docx" >/dev/null 2>&1 )
   [ $? -eq 3 ] || { echo "  $f.docx 未返回退出码 3"; ok=0; }
 done
 rm -rf "$tmp"
 [ $ok -eq 1 ] && echo "  四种坏输入均返回退出码 3"
 note $((ok==1?0:1))
+
+step "8b. 工具层端到端（合成 docx，无需真实文件）"
+node test/tool-e2e.mjs 2>&1 | tail -8
+note $?
 
 if [ -n "$DOC" ] && [ -f "$DOC" ]; then
   step "9. 端到端（$DOC）"

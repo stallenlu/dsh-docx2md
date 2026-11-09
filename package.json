@@ -2,7 +2,7 @@
   "name": "dsh-docx2md",
   "displayName": "DSH DOCX → Markdown",
   "description": "把含公式的 Word 文档转成带 LaTeX 的 Markdown —— OLE、Word 原生 OMML、图片公式三种载体都处理，跨平台，保留公式编号与结构。",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "author": "sidady",
   "keywords": [
     "dsh-plugin",
@@ -15,6 +15,10 @@
     "conversion"
   ],
   "type": "module",
+  "scripts": {
+    "test": "bash test/run-all.sh",
+    "prepack": "node test/prepack.mjs"
+  },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
@@ -37,6 +41,10 @@
     "LICENSE"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

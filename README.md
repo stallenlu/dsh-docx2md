@@ -52,21 +52,21 @@ DSH 的 profile 用 **pnpm** 管理，`node_modules` 是 pnpm 管的（`nodeLink
 **不要手工往 `node_modules` 里拷目录**——下次 `pnpm install` 会把没有写进
 lockfile 的目录删掉。
 
-本包已发布到 npm（[`dsh-docx2md@0.6.4`](https://www.npmjs.com/package/dsh-docx2md)），
+本包已发布到 npm（[`dsh-docx2md@0.6.5`](https://www.npmjs.com/package/dsh-docx2md)），
 **日常使用直接装正式版本**，不依赖本地源码：
 
 ```bash
 cd ~/.dsh/profiles/desktop
-pnpm add dsh-docx2md@0.6.4          # 正式 npm 包（推荐，会写进 pnpm-lock.yaml）
+pnpm add dsh-docx2md@0.6.5          # 正式 npm 包（推荐，会写进 pnpm-lock.yaml）
 
 # 或 DSH 安装器一条命令（等价于上面的 pnpm add）
-dsh plugin --profile desktop add dsh-docx2md@0.6.4
+dsh plugin --profile desktop add dsh-docx2md@0.6.5
 
 # 或装版本固定的 GitHub Release tarball（与 npm 包字节一致，不需要 npm）
-dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releases/download/v0.6.4/dsh-docx2md-0.6.4.tgz
+dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releases/download/v0.6.5/dsh-docx2md-0.6.5.tgz
 ```
 
-升级时把 `@0.6.4` 换成新版本号即可。
+升级时把 `@0.6.5` 换成新版本号即可。
 
 ### 声明的两处
 
@@ -74,7 +74,7 @@ dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releas
 
 ```jsonc
 {
-  "dependencies": { "dsh-docx2md": "0.6.4" },
+  "dependencies": { "dsh-docx2md": "0.6.5" },
   "dsh": { "profile": { "bundles": [ /* ... */, "dsh-docx2md" ] } }
 }
 ```
@@ -84,7 +84,7 @@ dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releas
 **不要再往 profile 的 `cordis.patch.yml` 里手写 `insert`** —— 那会导致同一插件被
 注册两次。
 
-`dependencies` 里写的是 **npm 版本号**（`pnpm add dsh-docx2md@0.6.4` 会自动写入这一行和 `pnpm-lock.yaml`）；不要再写成 `file:` 路径或 `github:` 地址。
+`dependencies` 里写的是 **npm 版本号**（`pnpm add dsh-docx2md@0.6.5` 会自动写入这一行和 `pnpm-lock.yaml`）；不要再写成 `file:` 路径或 `github:` 地址。
 
 ### 让配置改完立即生效
 
@@ -122,7 +122,7 @@ pnpm add github:<你的账号>/dsh-docx2md
 再把包名加进 `bundles`。装好之后改 `~/.dsh/packages/dsh-docx2md` 里的文件即可——
 pnpm 建的是**硬链接**，改动会立即反映到 `node_modules`（若用编辑器原子写入导致
 硬链接断开，重跑一次 `pnpm install` 即可）。`file:` / `github:` 这类依赖只用于开发，
-正式环境请用 `dsh-docx2md@0.6.4`。
+正式环境请用 `dsh-docx2md@0.6.5`。
 
 ---
 
@@ -298,7 +298,8 @@ docx2md_extract(path, outDir?, render?)
   公式会出现两遍
 
 ```
-docx2md_build(workDir, latex, out, suggestHeadings?, expectFormulas?)
+docx2md_build(workDir, latex, out, suggestHeadings?, useSuggestedHeadings?,
+              expectFormulas?, longTexChars?, t5MaxCellFormula?, cleanup?)
 ```
 把 `{"oleObject1.bin": "\\alpha", ...}` 合成 Markdown 并校验。
 `expectFormulas` 会核对公式总数，能抓住漏转。OMML 公式无需出现在 latex 表里
@@ -577,10 +578,11 @@ profile 的 `package.json` 里若有 `"dsh": { "profile": { "patchReload": "live
 4. `\tag` 紧跟 `\end{aligned}`
 5. 超长公式不要塞进表格单元格
 6. 图片占位用 HTML 注释 —— `![]()` 空链接会显示破图
-7. **行内公式与中文之间要有空格** —— `中文$公式$中文` 在不少渲染器里不被识别为
-   公式，用户看到的是 LaTeX 源码原样出现。`build.py` 会自动补，校验器用 **T10** 兜底。
+补充一条（校验器用 **T10** 兜底）：**行内公式与中文之间要有空格** ——
+`中文$公式$中文` 在不少渲染器里不被识别为公式，用户看到的是 LaTeX 源码原样
+出现；`build.py` 会自动补空格。
 
-`docx2md_build` 内置 `validate.py` 会逐条检查（T1–T12）。
+`docx2md_build` 内置 `validate.py` 会逐条检查（T1–T14）。
 
 ---
 
@@ -614,6 +616,36 @@ node test/pack.mjs                    # 打包内容
 （拿 tarball 真装一次、真跑一次、再卸载）。后者是关键——GitHub 安装最终产出的
 就是 tarball，`file:` 本地目录安装走的却是另一条路（硬链接、整个目录都在），
 两者不能互证。
+
+### CI 与发布自动化
+
+仓库带两条 GitHub Actions：
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| `.github/workflows/ci.yml` | push 到 main / PR / 手动 | 语法门禁、工具与技能契约、全部不依赖渲染引擎的 Python e2e、工具层端到端、`test/pack.mjs` 打包门禁 |
+| `.github/workflows/publish.yml` | GitHub Release 发布 / 手动 | 跑 `test/pack.mjs` 后 `npm publish --provenance --access public` |
+
+CI 刻意不跑 `test/run-all.sh` 的全套：`7j` 画布渲染需要无头 Edge 或
+LibreOffice（GitHub-hosted runner 没有），`11`/`15`/`16` 又依赖本机 DSH
+profile；这些在干净 CI 里要么失败要么无意义。CI 只跑环境无关、本机实测全绿的
+那一组，画布渲染留给本地有人值守时验证。
+
+`package.json` 的 `prepack` 指向 `node test/prepack.mjs`：每次 `npm pack` /
+`npm publish` 自动做一遍静态门禁（元数据齐备、入口与资源文件齐全、
+`files` 白名单必须写 `py/*.py` 而不是裸 `py`——后者会把 `py/__pycache__/*.pyc`
+打进 tarball）。本地 / CI 跑过 Python 测试后 `py/__pycache__` 常驻是正常现象，
+prepack 只提示、不误判为失败。prepack 的所有输出走 **stderr**：npm 会把它的
+stdout 转发进 `npm pack --json` 的 stdout，那样会污染 JSON。
+**prepack 里绝不能再调 `npm pack`**——`npm pack --dry-run` 也会触发 prepack，
+那样会无限递归。真正的 tarball 清单核对放在 `test/pack.mjs`（由 CI 单独跑）。
+
+provenance 由 `publishConfig.provenance: true` + 发布工作流的
+`--provenance` + `permissions: id-token: write` 三重保证：npm 用 GitHub OIDC
+把包签进 Sigstore 公开透明日志，npmjs 页面会显示「Built and signed on GitHub
+Actions」。需要仓库 secret `NPM_TOKEN`（npm 自动化/粒度令牌，对本包有发布权限）；
+发布必须在 GitHub-hosted runner 上跑（OIDC 令牌只有云托管 runner 才发）。详见
+[npm provenance 文档](https://docs.npmjs.com/generating-provenance-statements)。
 
 ### 打包内容
 
@@ -767,7 +799,7 @@ node test/encoding.mjs 真实文档.docx    # 再验一份中文文档
   变体 B 的解法），但它在原始实验里是手工做的一步，没有固化进本插件；`pypdf`
   目前只是预留依赖，`py/` 下零引用。因此 15/145 的变体 B 公式只能靠渲染图读，
   读不清时 `extract` 的 `summary.formulas_without_media` 会报出数量，不会假装成功。
-  详见 [docs/methodology.md](docs/methodology.md) 开头的说明。
+  详见 [docs/methodology.md](https://github.com/stallenlu/dsh-docx2md/blob/main/docs/methodology.md) 开头的说明。
 
 - **只吃 `.docx`**。旧 `.doc` 请先用 Word / WPS 另存。非 zip、空 zip、缺
   `word/document.xml`、加密文档都会给出可读错误并以退出码 3 结束。
@@ -864,7 +896,7 @@ dsh-docx2md/
 │   └── SKILL.md       技能说明（给 Agent 读）
 ├── docs/
 │   └── methodology.md 完整方法论（转换实验总结）
-├── test/              24 组测试（22 日常 + 2 发布前；不进发布包）
+├── test/              全部测试（不进发布包）
 ├── cordis.patch.yml   插件注册
 └── CHANGELOG.md
 ```

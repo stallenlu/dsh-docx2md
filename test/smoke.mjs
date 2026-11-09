@@ -4,13 +4,14 @@
  * 用法: node test/smoke.mjs <file.docx>
  */
 import { spawn } from 'node:child_process'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, mkdtemp } from 'node:fs/promises'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
 const PY_DIR = join(ROOT, 'py')
-const DEPS = ['--from', 'olefile', '--with', 'pypdf']
+const DEPS = ['--from', 'olefile', '--with', 'pillow']
 
 function run(cmd, args, cwd) {
   return new Promise((done) => {
@@ -33,7 +34,7 @@ if (!src) {
   process.exit(2)
 }
 
-const work = '/tmp/dsh_docx2md_smoke'
+const work = await mkdtemp(join(tmpdir(), 'd2m-smoke-'))
 await mkdir(work, { recursive: true })
 
 console.log('== 1. inspect ==')
@@ -76,7 +77,7 @@ console.log(JSON.stringify(b, null, 1))
 
 console.log('\n== 6. validate ==')
 const val = await py('validate.py', [join(work, 'out.md'),
-  '--expect-formulas', String(info.formulas), '--json'], work)
+  '--expect-formulas', String(info.formulas_total), '--json'], work)
 const v = JSON.parse(val.out.trim())
 console.log(JSON.stringify(v, null, 1))
 
@@ -85,7 +86,7 @@ const checks = [
   ['段落数一致', b.paragraphs === ex.paragraphs_nonempty],
   ['公式全部解析', b.unresolved_placeholders === 0],
   ['公式全部有 LaTeX', b.formulas_missing === 0],
-  ['公式数吻合', (b.formulas_display + b.formulas_inline) === info.formulas],
+  ['公式数吻合', (b.formulas_display + b.formulas_inline) === info.formulas_total],
   ['校验通过', v.status === 'PASS'],
 ]
 let fail = 0

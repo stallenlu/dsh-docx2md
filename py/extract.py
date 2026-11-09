@@ -41,7 +41,7 @@ import sys
 import zipfile
 from xml.etree import ElementTree as ET
 
-from docxfile import BadDocument, fail, force_utf8_stdio, open_docx
+from docxfile import BadDocument, fail, force_utf8_stdio, open_docx, read_rels, pair_ole_previews
 import canvas
 import docstyle
 import imgsize
@@ -211,15 +211,15 @@ def main():
         z, root = open_docx(src)
     except BadDocument as exc:
         fail(str(exc))
-    names = z.namelist()
+    names = set(z.namelist())
+    seen = set()        # 全流程图片 rId 去重（跨所有 _emit_media 调用共享）
+    warnings = []       # 降级事件随 summary.json 回传，宿主不再看不到
 
     os.makedirs(outdir, exist_ok=True)
 
-    rels_path = "word/_rels/document.xml.rels"
-    rel_map = {}
-    if rels_path in names:
-        rels = z.read(rels_path).decode("utf-8", "replace")
-        rel_map = dict(re.findall(r'Id="([^"]+)"[^>]*Target="([^"]+)"', rels))
+    # 统一走 docxfile.read_rels：按 XML 属性读取，不依赖 Id/Target 顺序；
+    # 包内媒体目标不含 External 外链，正合 rel_map 的用途。
+    rel_map = read_rels(z)
 
     body = root.find(W + "body")
 
@@ -232,7 +232,8 @@ def main():
     # 且不会有任何提示。宁可清掉让人重新确认一次。
     for stale in ("paras.json", "eq_index.json", "summary.json",
                   "build_report.json", "headings_suggested.json", "headings.json",
-                  "image_inventory.json", "textbox_labels.json", "docstruct.json"):
+                  "image_inventory.json", "textbox_labels.json", "docstruct.json",
+                  "blocks.json"):
         p_stale = os.path.join(outdir, stale)
         if os.path.exists(p_stale):
             os.remove(p_stale)
@@ -389,7 +390,7 @@ def main():
             return outermost_p(el, parents) is host_p
 
         out = []
-        seen = set()
+        # seen 提升到 main() 作用域，跨所有 _emit_media 调用共享去重
         # 纯 OLE 预览图容器：里面没有别的内容，整棵跳过。
         # 但容器自己装着 OLEObject 时 is_ole_preview 会返回 False（见其
         # docstring），所以这里不会吞掉公式。
@@ -660,7 +661,9 @@ def main():
             json.dump({"blocks": blocks, "paragraphs": len(paras)},
                       f, ensure_ascii=False, indent=1)
     except (TypeError, ValueError) as exc:                # noqa: BLE001
-        sys.stderr.write("警告: 块结构落盘失败（表格将退化为段落）: %s\n" % exc)
+        msg = "块结构落盘失败（表格将退化为段落）: %s" % exc
+        sys.stderr.write("警告: %s\n" % msg)
+        warnings.append(msg)
 
     # ---- 1b. 段落结构信号（样式级别 / 自动编号 / 整段加粗）----
     # 为什么单独落一个文件而不是塞进 paras.json：paras.json 是「正文」，
@@ -674,7 +677,9 @@ def main():
         marks = docstyle.paragraph_marks(z, p_elems)
     except Exception as exc:                              # noqa: BLE001
         # 结构读取只是加分项：任何异常都不能让整次提取失败，退回纯正则。
-        sys.stderr.write("警告: 段落结构读取失败（退回纯正则判标题）: %s\n" % exc)
+        msg = "段落结构读取失败（退回纯正则判标题）: %s" % exc
+        sys.stderr.write("警告: %s\n" % msg)
+        warnings.append(msg)
         marks = []
     if marks:
         with open(os.path.join(outdir, "docstruct.json"), "w", encoding="utf-8") as f:
@@ -694,35 +699,10 @@ def main():
     #
     # 回退：ShapeID 缺失或对不上时（少数生成器不写 ShapeID），退回下标配对，
     # 但把结果标记为 unverified，让 summary 能报出来。
-    shape_preview = {}          # shape id -> media target
-    for p in body.iter(W + "p"):
-        for sh in p.iter(V + "shape"):
-            if sh.get(O + "ole") != "t":
-                continue
-            ims = list(sh.iter(V + "imagedata"))
-            if ims:
-                shape_preview[sh.get("id")] = rel_map.get(ims[0].get(R + "id"))
-
-    pairs = {}
-    pairing = {}                # stream -> "shape-id" | "ordinal"
-    ole_shape_id = {}           # stream -> OLEObject@ShapeID（判"是否在画布内"）
-    for p in body.iter(W + "p"):
-        imgs = [i.get(R + "id") for i in p.iter(V + "imagedata")]
-        for k, obj in enumerate(p.iter(O + "OLEObject")):
-            oid = (rel_map.get(obj.get(R + "id")) or "?").split("/")[-1]
-            sid = obj.get("ShapeID")
-            if sid:
-                ole_shape_id[oid] = sid
-            target = shape_preview.get(sid)
-            if target:
-                pairs[oid] = target
-                pairing[oid] = "shape-id"
-            elif k < len(imgs):
-                pairs[oid] = rel_map.get(imgs[k]) or None      # "media/image49.wmf"
-                pairing[oid] = "ordinal"
-            else:
-                pairs[oid] = None
-                pairing[oid] = "none"
+    # 配对逻辑抽到 docxfile.pair_ole_previews，与 inspect（docx_scan.py）共用
+    # 同一把尺子。以前两个脚本各写一份，口径一旦分叉，inspect 与 extract
+    # 对同一份文档报出的预览图数量 / 格式就会不一致且都不报错。
+    pairs, pairing, ole_shape_id = pair_ole_previews(body, rel_map, W, R, V, O)
 
     # ---- 3. 抽取预览图到 media/ ----
     os.makedirs(media_dir, exist_ok=True)
@@ -934,6 +914,7 @@ def main():
         sys.exit(EXIT_SILENT_LOSS)
 
     summary = {
+        "warnings": warnings,
         "paragraphs": len(paras),
         "paragraphs_nonempty": len(paras) - n_empty,
         # 文本框（流程图）里的文字：不是正文段落，但真实存在，单独留痕。

@@ -52,21 +52,21 @@ DSH 的 profile 用 **pnpm** 管理，`node_modules` 是 pnpm 管的（`nodeLink
 **不要手工往 `node_modules` 里拷目录**——下次 `pnpm install` 会把没有写进
 lockfile 的目录删掉。
 
-本包已发布到 npm（[`dsh-docx2md@0.6.5`](https://www.npmjs.com/package/dsh-docx2md)），
+本包已发布到 npm（[`dsh-docx2md@0.6.6`](https://www.npmjs.com/package/dsh-docx2md)），
 **日常使用直接装正式版本**，不依赖本地源码：
 
 ```bash
 cd ~/.dsh/profiles/desktop
-pnpm add dsh-docx2md@0.6.5          # 正式 npm 包（推荐，会写进 pnpm-lock.yaml）
+pnpm add dsh-docx2md@0.6.6          # 正式 npm 包（推荐，会写进 pnpm-lock.yaml）
 
 # 或 DSH 安装器一条命令（等价于上面的 pnpm add）
-dsh plugin --profile desktop add dsh-docx2md@0.6.5
+dsh plugin --profile desktop add dsh-docx2md@0.6.6
 
 # 或装版本固定的 GitHub Release tarball（与 npm 包字节一致，不需要 npm）
-dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releases/download/v0.6.5/dsh-docx2md-0.6.5.tgz
+dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releases/download/v0.6.6/dsh-docx2md-0.6.6.tgz
 ```
 
-升级时把 `@0.6.5` 换成新版本号即可。
+升级时把 `@0.6.6` 换成新版本号即可。
 
 ### 声明的两处
 
@@ -74,7 +74,7 @@ dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releas
 
 ```jsonc
 {
-  "dependencies": { "dsh-docx2md": "0.6.5" },
+  "dependencies": { "dsh-docx2md": "0.6.6" },
   "dsh": { "profile": { "bundles": [ /* ... */, "dsh-docx2md" ] } }
 }
 ```
@@ -84,7 +84,7 @@ dsh plugin --profile desktop add https://github.com/stallenlu/dsh-docx2md/releas
 **不要再往 profile 的 `cordis.patch.yml` 里手写 `insert`** —— 那会导致同一插件被
 注册两次。
 
-`dependencies` 里写的是 **npm 版本号**（`pnpm add dsh-docx2md@0.6.5` 会自动写入这一行和 `pnpm-lock.yaml`）；不要再写成 `file:` 路径或 `github:` 地址。
+`dependencies` 里写的是 **npm 版本号**（`pnpm add dsh-docx2md@0.6.6` 会自动写入这一行和 `pnpm-lock.yaml`）；不要再写成 `file:` 路径或 `github:` 地址。
 
 ### 让配置改完立即生效
 
@@ -122,7 +122,7 @@ pnpm add github:<你的账号>/dsh-docx2md
 再把包名加进 `bundles`。装好之后改 `~/.dsh/packages/dsh-docx2md` 里的文件即可——
 pnpm 建的是**硬链接**，改动会立即反映到 `node_modules`（若用编辑器原子写入导致
 硬链接断开，重跑一次 `pnpm install` 即可）。`file:` / `github:` 这类依赖只用于开发，
-正式环境请用 `dsh-docx2md@0.6.5`。
+正式环境请用 `dsh-docx2md@0.6.6`。
 
 ---
 

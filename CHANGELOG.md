@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.6
+
+### 发布链路：首次由 GitHub Actions 产出 npm provenance 签名
+
+纯文档/版本补丁，无代码改动。用途是端到端验证 `.github/workflows/publish.yml`：
+把发布从本机移到 GitHub-hosted runner，由 npm 用 GitHub OIDC 生成 Sigstore
+provenance 证明并写入透明日志（0.6.5 是本机发布、无 OIDC，故未签名）。
+
+- 版本 0.6.6；README 安装示例同步到 0.6.6。
+- `publish.yml` 在 Release published 时触发：先跑 `test/pack.mjs` 门禁，再
+  `npm publish --provenance --access public`（`permissions: id-token: write`
+  + `secrets.NPM_TOKEN` + `publishConfig.provenance: true`）。
+- 本次 tarball 由 CI 发布，Release 附带的 `.tgz` 为本地 `npm pack` 的同一份
+  （仅作固定下载链接，实际签名以 npm registry 的 attestation 为准）。
+
 ## 0.6.5
 
 ### 稳定性、正确性与发布自动化（代码审查整改）

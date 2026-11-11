@@ -1,0 +1,63 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 只跑环境无关、本机实测全绿的一组。全套 test/run-all.sh 里：
+#   7j 画布渲染需要无头 Edge / LibreOffice（GitHub-hosted runner 没有）
+#   11/15/16 依赖本机 DSH profile（干净 CI 无意义）
+# 故不直接跑 run-all.sh，避免 CI 因缺渲染引擎而常红。
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    env:
+      # 跑过 Python 测试后不留 py/__pycache__，prepack 保持干净。
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装 Python 依赖（olefile / pillow）
+        run: python -m pip install --upgrade pip olefile pillow
+      - name: 语法门禁
+        run: |
+          for f in py/*.py; do python -c "import ast,sys; ast.parse(open('$f',encoding='utf-8').read())"; done
+          for f in lib/*.js test/*.mjs; do node --check "$f"; done
+          for f in test/*.sh; do bash -n "$f"; done
+      - name: 工具 / 技能契约
+        run: |
+          node test/tool-contract.mjs
+          node test/skill-contract.mjs
+      - name: Python 校验器与 e2e（不含画布渲染）
+        env:
+          DOCX2MD_TEST_PYTHON: python
+        run: |
+          for t in validate_selftest pairing_selftest omml_selftest omml_e2e \
+                   image_formula_e2e pict_ole_e2e docstruct_e2e generic_struct_e2e \
+                   parafmt_e2e detector_portability display_selftest; do
+            echo "== $t =="; python "test/$t.py"
+          done
+      - name: 工具层端到端（合成 docx，无需真实文件）
+        env:
+          DOCX2MD_TEST_PYTHON: python
+        run: node test/tool-e2e.mjs
+      - name: 跨平台路径 / 临时目录 / 中文编码
+        env:
+          DOCX2MD_TEST_PYTHON: python
+        run: |
+          node test/paths.mjs
+          node test/hygiene.mjs
+          node test/encoding.mjs
+      - name: prepack 静态门禁
+        run: node test/prepack.mjs
+      - name: tarball 打包门禁
+        env:
+          DOCX2MD_TEST_PYTHON: python
+        run: node test/pack.mjs

@@ -1,0 +1,37 @@
+name: Publish to npm (provenance)
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# provenance 三要素：
+#   1. package.json 的 publishConfig.provenance: true
+#   2. 本步骤的 --provenance 与 permissions: id-token: write
+#   3. GitHub-hosted runner（OIDC 令牌只有云托管 runner 才发）
+# 需要仓库 secret NPM_TOKEN（npm 自动化/粒度令牌，对本包有发布权限）。
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip olefile pillow
+      - name: 打包门禁
+        env:
+          DOCX2MD_TEST_PYTHON: python
+        run: node test/pack.mjs
+      - name: npm publish --provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
